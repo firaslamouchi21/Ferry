@@ -1,0 +1,8 @@
+target
+.git
+ui/node_modules
+desktop/node_modules
+ext/node_modules
+**/*.dc.html
+docs/private
+FINISH_LINE.md

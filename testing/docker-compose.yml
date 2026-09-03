@@ -1,0 +1,38 @@
+name: ferry-two-peer
+
+services:
+  alice:
+    build:
+      context: ..
+      dockerfile: testing/Dockerfile
+    image: ferry-test:latest
+    hostname: alice
+    networks: [ferrynet]
+    volumes:
+      - alice-data:/data
+      - shared:/shared
+    environment:
+      HOME: /root
+      DBUS_SESSION_BUS_ADDRESS: unix:path=/run/ferry-session-bus
+    command: ["ferry-daemon"]
+
+  bob:
+    image: ferry-test:latest
+    hostname: bob
+    networks: [ferrynet]
+    volumes:
+      - bob-data:/data
+      - shared:/shared
+    environment:
+      HOME: /root
+      DBUS_SESSION_BUS_ADDRESS: unix:path=/run/ferry-session-bus
+    command: ["ferry-daemon"]
+
+networks:
+  ferrynet:
+    driver: bridge
+
+volumes:
+  alice-data:
+  bob-data:
+  shared:

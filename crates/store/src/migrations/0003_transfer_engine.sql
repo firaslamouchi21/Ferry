@@ -1,0 +1,3 @@
+ALTER TABLE inbox_items ADD COLUMN bytes_received_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE inbox_items ADD COLUMN is_opened INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE outbound_items ADD COLUMN notify_on_open INTEGER NOT NULL DEFAULT 0;

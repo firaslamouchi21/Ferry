@@ -1,0 +1,57 @@
+{
+  "name": "@ferry/ext-vscode",
+  "displayName": "Ferry",
+  "description": "Serverless peer-to-peer file, secret, and message transfer for developer teams",
+  "private": true,
+  "version": "0.1.0",
+  "type": "commonjs",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other"],
+  "main": "./dist/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [{ "id": "ferry", "title": "Ferry", "icon": "media/ferry.svg" }]
+    },
+    "views": {
+      "ferry": [{ "id": "ferryPeers", "name": "Peers" }]
+    },
+    "commands": [
+      { "command": "ferry.open", "title": "Ferry: Open Panel" },
+      { "command": "ferry.pair", "title": "Ferry: Pair a Device" },
+      { "command": "ferry.sendFile", "title": "Ferry: Send File" },
+      { "command": "ferry.openInbox", "title": "Ferry: Open Inbox" },
+      { "command": "ferry.copyFingerprint", "title": "Ferry: Copy My Fingerprint" },
+      { "command": "ferry.refreshPeers", "title": "Ferry: Refresh Peers", "icon": "$(refresh)" }
+    ],
+    "menus": {
+      "explorer/context": [{ "command": "ferry.sendFile", "group": "7_modification", "when": "!explorerResourceIsFolder" }],
+      "view/title": [{ "command": "ferry.refreshPeers", "when": "view == ferryPeers", "group": "navigation" }]
+    },
+    "configuration": {
+      "title": "Ferry",
+      "properties": {
+        "ferry.socketPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Ferry daemon IPC socket. Empty means the platform default."
+        },
+        "ferry.daemonPath": {
+          "type": "string",
+          "default": "ferry-daemon",
+          "description": "Path to the ferry-daemon binary used for lifecycle actions."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "pnpm --filter @ferry/ui build && node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "ferry-daemon"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ferry-daemon"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+ferry-proto = { path = "../proto" }
+ferry-core = { path = "../core" }
+ferry-crypto = { path = "../crypto" }
+ferry-net = { path = "../net" }
+ferry-store = { path = "../store" }
+serde = "1.0.229"
+serde_json = "1.0.151"
+toml = "1.1.4"
+fs2 = "0.4.3"
+ctrlc = "3.4"
+thiserror = "2.0.20"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+hex = "0.4.3"
+sha2 = "0.10"
+uuid = { version = "1.25.0", features = ["v7"] }
+mdns-sd = "0.21.0"

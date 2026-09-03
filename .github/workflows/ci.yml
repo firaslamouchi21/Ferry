@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main, sandbox]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: Supply chain, lint, bindings, tests (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny and cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+
+      - name: cargo deny check
+        run: cargo deny check
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: cargo build --workspace --locked
+        run: cargo build --workspace --locked
+
+      - name: cargo clippy --workspace --all-targets --locked
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Regenerate ts-rs bindings and fail on diff
+        run: |
+          cargo test --package ferry-proto --locked
+          git diff --exit-code -- bindings/
+
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+
+  frontend:
+    name: UI + extension (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate bindings for the UI typecheck
+        run: cargo test --package ferry-proto --locked
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @ferry/ui typecheck
+      - run: pnpm --filter @ferry/ui test
+      - run: pnpm --filter @ferry/ui build
+      - run: pnpm --filter @ferry/ext-vscode build
+
+  macos:
+    name: Build & test (macos)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --workspace --locked
+        run: cargo build --workspace --locked
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+
+  windows-portable-crates:
+    name: Build & test platform-agnostic crates (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the crates that do not depend on Unix domain sockets
+        run: cargo build --locked -p ferry-proto -p ferry-core -p ferry-crypto -p ferry-net -p ferry-store
+      - name: Test those crates
+        run: cargo test --locked -p ferry-proto -p ferry-core -p ferry-crypto -p ferry-store
+      - name: Track readiness of the full Windows build (daemon + CLI still need a named-pipe IPC transport)
+        continue-on-error: true
+        run: cargo build --workspace --locked
+
+  desktop:
+    name: Tauri shell compiles (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Regenerate bindings for the desktop typecheck
+        run: cargo test --package ferry-proto --locked
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @ferry/desktop build
+      - name: cargo check the Tauri crate (its own workspace, so the root build never sees it)
+        working-directory: desktop/src-tauri
+        run: cargo check --locked
+
+  docker-two-peer:
+    name: Two-peer end-to-end scenario (docker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the scripted pair + send + open scenario across two containers
+        run: bash testing/scenario.sh

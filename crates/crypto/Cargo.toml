@@ -1,0 +1,26 @@
+[package]
+name = "ferry-crypto"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+age = "0.12.1"
+bech32 = "0.11"
+bincode = "1"
+chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+ferry-proto = { path = "../proto" }
+hex = "0.4.3"
+hkdf = "0.12"
+keyring = { version = "4.1.6", features = ["apple-native-keyring-store"] }
+rand = "0.8"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10"
+region = "4.0.0"
+spake2 = "0.4.0"
+thiserror = "2.0.20"
+zeroize = "1.9.0"

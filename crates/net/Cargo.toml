@@ -1,0 +1,13 @@
+[package]
+name = "ferry-net"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferry-proto = { path = "../proto" }
+mdns-sd = "0.21.0"
+snow = "0.10.0"
+thiserror = "2.0.20"

@@ -1,0 +1,25 @@
+[package]
+name = "ferry-cli"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "ferry"
+path = "src/main.rs"
+
+[dependencies]
+ferry-proto = { path = "../proto" }
+ferry-core = { path = "../core" }
+ferry-net = { path = "../net" }
+ferry-crypto = { path = "../crypto" }
+clap = { version = "4.5.51", features = ["derive"] }
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hex = "0.4.3"
+rand = "0.8"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+uuid = { version = "1.25.0", features = ["v7"] }

@@ -1,0 +1,10 @@
+packages:
+  - "ui"
+  - "ext/vscode"
+  - "desktop"
+
+allowBuilds:
+  esbuild: set this to true or false
+
+onlyBuiltDependencies:
+  - esbuild

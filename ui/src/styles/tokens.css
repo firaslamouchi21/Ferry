@@ -1,0 +1,57 @@
+:root {
+  color-scheme: dark;
+
+  --surface: #131315;
+  --surface-container-lowest: #0e0e10;
+  --surface-container-low: #1b1b1d;
+  --surface-container: #1f1f21;
+  --surface-container-high: #2a2a2b;
+  --surface-container-highest: #353436;
+  --surface-bright: #39393b;
+
+  --on-surface: #e4e2e4;
+  --on-surface-variant: #a7a7ad;
+  --on-surface-faint: #7d7d84;
+
+  --outline: #55565d;
+  --outline-variant: #2f3033;
+
+  --primary: #bec6e0;
+  --on-primary: #283044;
+  --primary-container: #2b3245;
+
+  --error: #ffb4ab;
+  --error-container: #93000a;
+
+  --status-online: #4ba585;
+  --status-warn: #d1a054;
+  --status-offline: #6b6c73;
+  --status-error: #e0685f;
+
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+
+  --text-h1-size: 20px;
+  --text-h1-weight: 600;
+  --text-h2-size: 15px;
+  --text-h2-weight: 600;
+  --text-body-size: 13px;
+  --text-body-weight: 400;
+  --text-sm-size: 12px;
+  --text-label-weight: 500;
+
+  --radius: 3px;
+  --radius-sm: 2px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  --nav-width: 240px;
+  --topbar-height: 48px;
+
+  --border: 1px solid var(--outline-variant);
+}
