@@ -1,14 +1,12 @@
-mod pairing;
-
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
+use ferry_core::pairing;
 use ferry_proto::ipc::{
     IpcEnvelope, IpcOutcome, IpcRequest, IpcResponse, IpcResult, RequestId, IPC_PROTOCOL_VERSION,
 };
@@ -187,7 +185,7 @@ fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
         }
     };
 
-    let mut stream = UnixStream::connect(&socket_path).map_err(|source| {
+    let mut stream = ferry_net::local_ipc::connect(&socket_path).map_err(|source| {
         format!(
             "unreachable: could not connect to the ferry daemon at {} — is it running? ({source})",
             socket_path.display()
@@ -700,7 +698,7 @@ fn cmd_watch() -> Result<(), String> {
         Some(path) => path,
         None => ferry_core::config::ipc_socket_path(&ferry_core::config::default_data_dir()),
     };
-    let mut stream = UnixStream::connect(&socket_path)
+    let mut stream = ferry_net::local_ipc::connect(&socket_path)
         .map_err(|e| format!("unreachable: could not connect to the ferry daemon: {e}"))?;
     let envelope = IpcEnvelope {
         ipc_protocol_version: IPC_PROTOCOL_VERSION,

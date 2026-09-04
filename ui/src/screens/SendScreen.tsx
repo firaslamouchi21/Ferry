@@ -65,7 +65,7 @@ export function SendScreen() {
     if (mode === "file") {
       if (!file) return;
       const path = (file as File & { path?: string }).path ?? file.name;
-      const id = await send.mutateAsync({
+      await send.mutateAsync({
         peer_id: effectivePeerId,
         source_path: path,
         name: file.name,
@@ -73,12 +73,12 @@ export function SendScreen() {
         is_burn_after_read: burn,
         notify_on_open: notify,
       });
-      navigate(`/inbox/${id}`);
+      navigate("/sent");
       return;
     }
     if (mode === "message") {
       if (!message.trim()) return;
-      const id = await sendInline.mutateAsync({
+      await sendInline.mutateAsync({
         peer_id: effectivePeerId,
         name: message.slice(0, 64),
         kind: "message" as ItemKind,
@@ -87,7 +87,7 @@ export function SendScreen() {
         is_burn_after_read: burn,
         notify_on_open: notify,
       });
-      navigate(`/inbox/${id}`);
+      navigate("/sent");
     }
   }
 

@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Download } from "lucide-react";
 import { useAuditLog } from "@/lib/query";
 import { Button, DataTable, EmptyState, StatusChip } from "@/components";
-import { num } from "@/lib/ipc";
+import { detectHost, num } from "@/lib/ipc";
 import { formatTime } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import { Async, ScreenHeader } from "./parts";
@@ -19,18 +19,38 @@ export function ActivityScreen() {
     return q ? all.filter((e) => `${e.actor} ${e.kind} ${e.item_id ?? ""} ${e.outcome}`.toLowerCase().includes(q)) : all;
   }, [audit.data, filter]);
 
-  function exportCsv() {
+  const [exportNote, setExportNote] = useState<string | null>(null);
+
+  async function exportCsv() {
     const header = "time,actor,kind,item_id,outcome";
     const lines = rows.map(
       (e) => `${new Date(num(e.occurred_at_millis)).toISOString()},${e.actor},${e.kind},${e.item_id ?? ""},${e.outcome}`,
     );
-    const blob = new Blob([[header, ...lines].join("\n")], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "ferry-activity.csv";
-    a.click();
-    URL.revokeObjectURL(url);
+    const csv = [header, ...lines].join("\n");
+
+    let downloaded = false;
+    if (detectHost() !== "vscode") {
+      try {
+        const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "ferry-activity.csv";
+        a.click();
+        URL.revokeObjectURL(url);
+        downloaded = true;
+      } catch {
+        void 0;
+      }
+    }
+    if (!downloaded) {
+      try {
+        await navigator.clipboard.writeText(csv);
+        setExportNote(t("activity.exportCopied"));
+      } catch {
+        setExportNote(t("activity.exportFailed"));
+      }
+      setTimeout(() => setExportNote(null), 6000);
+    }
   }
 
   return (
@@ -44,6 +64,8 @@ export function ActivityScreen() {
           </Button>
         }
       />
+
+      {exportNote ? <p className="muted export-note">{exportNote}</p> : null}
 
       <input
         className="text-input filter-input"

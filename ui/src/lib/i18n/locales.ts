@@ -1,4 +1,4 @@
-export const LOCALES = ["en", "fr", "de"] as const;
+export const LOCALES = ["en", "fr", "de", "es", "pt", "ja", "zh", "ar"] as const;
 export type Locale = (typeof LOCALES)[number];
 export const DEFAULT_LOCALE: Locale = "en";
 
@@ -6,7 +6,18 @@ export const LOCALE_LABELS: Record<Locale, string> = {
   en: "English",
   fr: "Français",
   de: "Deutsch",
+  es: "Español",
+  pt: "Português (Brasil)",
+  ja: "日本語",
+  zh: "中文（简体）",
+  ar: "العربية",
 };
+
+const RTL_LOCALES: ReadonlySet<Locale> = new Set(["ar"]);
+
+export function localeDirection(locale: Locale): "ltr" | "rtl" {
+  return RTL_LOCALES.has(locale) ? "rtl" : "ltr";
+}
 
 const STORAGE_KEY = "ferry.locale";
 

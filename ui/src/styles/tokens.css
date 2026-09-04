@@ -1,6 +1,38 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light dark;
 
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", "Hiragino Sans",
+    "Yu Gothic", "Meiryo", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC",
+    "Noto Sans Arabic", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+
+  --text-h1-size: 20px;
+  --text-h1-weight: 600;
+  --text-h2-size: 15px;
+  --text-h2-weight: 600;
+  --text-body-size: 13px;
+  --text-body-weight: 400;
+  --text-sm-size: 12px;
+  --text-label-weight: 500;
+
+  --radius: 3px;
+  --radius-sm: 2px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+
+  --nav-width: 240px;
+  --topbar-height: 48px;
+
+  --border: 1px solid var(--outline-variant);
+}
+
+:root,
+:root[data-theme="dark"] {
   --surface: #131315;
   --surface-container-lowest: #0e0e10;
   --surface-container-low: #1b1b1d;
@@ -27,31 +59,96 @@
   --status-warn: #d1a054;
   --status-offline: #6b6c73;
   --status-error: #e0685f;
+}
 
-  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
 
-  --text-h1-size: 20px;
-  --text-h1-weight: 600;
-  --text-h2-size: 15px;
-  --text-h2-weight: 600;
-  --text-body-size: 13px;
-  --text-body-weight: 400;
-  --text-sm-size: 12px;
-  --text-label-weight: 500;
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --surface: #ffffff;
+    --surface-container-lowest: #f4f4f5;
+    --surface-container-low: #efeff0;
+    --surface-container: #e9e9eb;
+    --surface-container-high: #e3e3e5;
+    --surface-container-highest: #dcdcde;
+    --surface-bright: #ffffff;
 
-  --radius: 3px;
-  --radius-sm: 2px;
+    --on-surface: #1c1c1e;
+    --on-surface-variant: #5c5c63;
+    --on-surface-faint: #8a8a91;
 
-  --sp-1: 4px;
-  --sp-2: 8px;
-  --sp-3: 12px;
-  --sp-4: 16px;
-  --sp-6: 24px;
-  --sp-8: 32px;
+    --outline: #b8b8be;
+    --outline-variant: #dcdce0;
 
-  --nav-width: 240px;
-  --topbar-height: 48px;
+    --primary: #3a4a78;
+    --on-primary: #ffffff;
+    --primary-container: #dde2f2;
 
-  --border: 1px solid var(--outline-variant);
+    --error: #b3261e;
+    --error-container: #f9dedc;
+
+    --status-online: #1f7a5c;
+    --status-warn: #a06a1f;
+    --status-offline: #8a8a91;
+    --status-error: #c0392b;
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --surface: #ffffff;
+  --surface-container-lowest: #f4f4f5;
+  --surface-container-low: #efeff0;
+  --surface-container: #e9e9eb;
+  --surface-container-high: #e3e3e5;
+  --surface-container-highest: #dcdcde;
+  --surface-bright: #ffffff;
+
+  --on-surface: #1c1c1e;
+  --on-surface-variant: #5c5c63;
+  --on-surface-faint: #8a8a91;
+
+  --outline: #b8b8be;
+  --outline-variant: #dcdce0;
+
+  --primary: #3a4a78;
+  --on-primary: #ffffff;
+  --primary-container: #dde2f2;
+
+  --error: #b3261e;
+  --error-container: #f9dedc;
+
+  --status-online: #1f7a5c;
+  --status-warn: #a06a1f;
+  --status-offline: #8a8a91;
+  --status-error: #c0392b;
+}
+
+:root[data-host="vscode"] {
+  --surface: var(--vscode-editor-background, #131315);
+  --surface-container-lowest: var(--vscode-sideBar-background, var(--surface));
+  --surface-container-low: var(--vscode-editorWidget-background, var(--surface));
+  --surface-container: var(--vscode-editorWidget-background, var(--surface));
+  --surface-container-high: var(--vscode-input-background, var(--surface));
+  --surface-container-highest: var(--vscode-dropdown-background, var(--surface));
+  --surface-bright: var(--vscode-editorHoverWidget-background, var(--surface));
+
+  --on-surface: var(--vscode-editor-foreground, var(--vscode-foreground, #e4e2e4));
+  --on-surface-variant: var(--vscode-descriptionForeground, #a7a7ad);
+  --on-surface-faint: var(--vscode-disabledForeground, #7d7d84);
+
+  --outline: var(--vscode-input-border, var(--vscode-widget-border, #55565d));
+  --outline-variant: var(--vscode-widget-border, #2f3033);
+
+  --primary: var(--vscode-button-background, #bec6e0);
+  --on-primary: var(--vscode-button-foreground, #283044);
+  --primary-container: var(--vscode-button-secondaryBackground, #2b3245);
+
+  --error: var(--vscode-errorForeground, #ffb4ab);
+  --error-container: var(--vscode-inputValidation-errorBackground, #93000a);
+
+  --status-error: var(--vscode-errorForeground, #e0685f);
 }

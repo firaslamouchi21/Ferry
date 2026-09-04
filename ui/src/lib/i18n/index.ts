@@ -2,13 +2,18 @@ import { createContext, createElement, useCallback, useContext, useEffect, useMe
 import { en, type Catalog } from "./en";
 import { fr } from "./fr";
 import { de } from "./de";
-import { DEFAULT_LOCALE, detectLocale, persistLocale, type Locale } from "./locales";
+import { es } from "./es";
+import { pt } from "./pt";
+import { ja } from "./ja";
+import { zh } from "./zh";
+import { ar } from "./ar";
+import { DEFAULT_LOCALE, detectLocale, localeDirection, persistLocale, type Locale } from "./locales";
 
-export { LOCALES, LOCALE_LABELS, DEFAULT_LOCALE, isLocale, detectLocale } from "./locales";
+export { LOCALES, LOCALE_LABELS, DEFAULT_LOCALE, isLocale, detectLocale, localeDirection } from "./locales";
 export type { Locale } from "./locales";
 export type { Catalog } from "./en";
 
-const CATALOGS: Record<Locale, Catalog> = { en, fr, de };
+const CATALOGS: Record<Locale, Catalog> = { en, fr, de, es, pt, ja, zh, ar };
 
 type Leaves<T, P extends string = ""> = {
   [K in keyof T & string]: T[K] extends string
@@ -78,7 +83,9 @@ export function I18nProvider({ children, locale: forced }: { children: ReactNode
   }, []);
 
   useEffect(() => {
-    if (typeof document !== "undefined") document.documentElement.lang = locale;
+    if (typeof document === "undefined") return;
+    document.documentElement.lang = locale;
+    document.documentElement.dir = localeDirection(locale);
   }, [locale]);
 
   const t = useCallback((key: MessageKey, vars?: Vars) => translate(locale, key, vars), [locale]);

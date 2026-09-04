@@ -1,13 +1,18 @@
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+
+use ferry_net::local_ipc::{self, Listener, Stream};
 
 use ferry_core::expiry::ExpiryClock;
 use ferry_core::ipc::RuntimeStatus;
 use ferry_core::ports::Store;
-use ferry_proto::ipc::{IpcEnvelope, IpcEvent, IpcOutcome, IpcRequest, IpcResource, IpcResponse, IpcResult};
+use ferry_proto::errors::{ErrorCode, FerryError};
+use ferry_proto::ipc::{
+    IpcEnvelope, IpcEvent, IpcOutcome, IpcRequest, IpcResource, IpcResponse, IpcResult, RequestId,
+};
 use thiserror::Error;
 
 use crate::event_bus::EventBus;
+use crate::pairing::PairingRegistry;
 
 #[derive(Debug, Error)]
 pub enum IpcServerError {
@@ -17,33 +22,32 @@ pub enum IpcServerError {
     Accept(std::io::Error),
 }
 
-pub fn bind(socket_path: &Path) -> Result<UnixListener, IpcServerError> {
-    if socket_path.exists() {
-        let _ = std::fs::remove_file(socket_path);
-    }
-    UnixListener::bind(socket_path).map_err(|source| IpcServerError::Bind {
+pub fn bind(socket_path: &Path) -> Result<Listener, IpcServerError> {
+    local_ipc::bind(socket_path).map_err(|source| IpcServerError::Bind {
         path: socket_path.to_path_buf(),
         source,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn serve(
-    listener: &UnixListener,
+    listener: &Listener,
     store: &mut impl Store,
     clock: &ExpiryClock,
     runtime: &RuntimeStatus,
     event_bus: &EventBus,
+    pairing: &PairingRegistry,
     source: &mut impl ferry_core::ports::OutboundSource,
 ) -> Result<(), IpcServerError> {
     loop {
-        let (stream, _addr) = listener.accept().map_err(IpcServerError::Accept)?;
-        if handle_connection(stream, store, clock, source, runtime, event_bus) {
+        let stream = local_ipc::accept(listener).map_err(IpcServerError::Accept)?;
+        if handle_connection(stream, store, clock, source, runtime, event_bus, pairing) {
             return Ok(());
         }
     }
 }
 
-fn spawn_event_stream(mut stream: UnixStream, event_bus: &EventBus) {
+fn spawn_event_stream(mut stream: Stream, event_bus: &EventBus) {
     let events = event_bus.subscribe();
     std::thread::spawn(move || {
         for event in events {
@@ -55,13 +59,15 @@ fn spawn_event_stream(mut stream: UnixStream, event_bus: &EventBus) {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_connection(
-    mut stream: UnixStream,
+    mut stream: Stream,
     store: &mut impl Store,
     clock: &ExpiryClock,
     source: &mut impl ferry_core::ports::OutboundSource,
     runtime: &RuntimeStatus,
     event_bus: &EventBus,
+    pairing: &PairingRegistry,
 ) -> bool {
     let frame = match ferry_net::framing::read_frame(&mut stream) {
         Ok(frame) => frame,
@@ -84,6 +90,12 @@ fn handle_connection(
         return false;
     }
 
+    if is_pairing_request(&envelope.request) {
+        let response = handle_pairing(&envelope.request_id, envelope.request.clone(), pairing, store, event_bus);
+        write_response(&mut stream, &response);
+        return false;
+    }
+
     let quit = ferry_core::ipc::is_quit(&envelope.request);
     let request = envelope.request.clone();
     let response = ferry_core::ipc::handle(
@@ -96,20 +108,92 @@ fn handle_connection(
         envelope.request,
     );
 
-    match serde_json::to_vec(&response) {
-        Ok(bytes) => {
-            if let Err(err) = ferry_net::framing::write_frame(&mut stream, &bytes) {
-                eprintln!("ferry-daemon: failed to write IPC response: {err}");
-            }
-        }
-        Err(err) => eprintln!("ferry-daemon: failed to encode IPC response: {err}"),
-    }
+    write_response(&mut stream, &response);
 
     if let Some(event) = event_for(&request, &response) {
         event_bus.emit(event);
     }
 
     quit
+}
+
+fn write_response(stream: &mut Stream, response: &IpcResponse) {
+    match serde_json::to_vec(response) {
+        Ok(bytes) => {
+            if let Err(err) = ferry_net::framing::write_frame(stream, &bytes) {
+                eprintln!("ferry-daemon: failed to write IPC response: {err}");
+            }
+        }
+        Err(err) => eprintln!("ferry-daemon: failed to encode IPC response: {err}"),
+    }
+}
+
+fn is_pairing_request(request: &IpcRequest) -> bool {
+    matches!(
+        request,
+        IpcRequest::PairBegin { .. }
+            | IpcRequest::PairStatus { .. }
+            | IpcRequest::PairConfirm { .. }
+            | IpcRequest::PairCancel { .. }
+    )
+}
+
+fn ok(request_id: &RequestId, value: IpcResult) -> IpcResponse {
+    IpcResponse {
+        request_id: request_id.clone(),
+        outcome: IpcOutcome::Ok { value },
+    }
+}
+
+fn pairing_err(request_id: &RequestId, message: String) -> IpcResponse {
+    IpcResponse {
+        request_id: request_id.clone(),
+        outcome: IpcOutcome::Err {
+            error: FerryError {
+                code: ErrorCode::Internal,
+                message,
+            },
+        },
+    }
+}
+
+fn handle_pairing(
+    request_id: &RequestId,
+    request: IpcRequest,
+    pairing: &PairingRegistry,
+    store: &mut impl Store,
+    event_bus: &EventBus,
+) -> IpcResponse {
+    match request {
+        IpcRequest::PairBegin { mode } => match pairing.begin(mode) {
+            Ok(view) => ok(request_id, IpcResult::PairBegin(view)),
+            Err(e) => pairing_err(request_id, e),
+        },
+        IpcRequest::PairStatus { pairing_id } => {
+            if let Some(peer) = pairing.take_pending_persist(&pairing_id) {
+                if let Err(e) = store.add_paired_peer(&peer) {
+                    return pairing_err(request_id, format!("pairing succeeded but the peer could not be saved: {e}"));
+                }
+                event_bus.emit(IpcEvent::Changed {
+                    resource: IpcResource::Roster,
+                    id: None,
+                });
+            }
+            match pairing.status_view(&pairing_id) {
+                Some(view) => ok(request_id, IpcResult::PairStatus(view)),
+                None => pairing_err(request_id, "no such pairing session".into()),
+            }
+        }
+        IpcRequest::PairConfirm { pairing_id, accept } => match pairing.confirm(&pairing_id, accept) {
+            Ok(()) => ok(request_id, IpcResult::Ack),
+            Err(e) => pairing_err(request_id, e),
+        },
+        IpcRequest::PairCancel { pairing_id } => {
+            pairing.cancel(&pairing_id);
+            ok(request_id, IpcResult::Ack)
+        }
+        _ => pairing_err(request_id, "not a pairing request".into()),
+    }
 }
 
 fn event_for(request: &IpcRequest, response: &IpcResponse) -> Option<IpcEvent> {
@@ -266,7 +350,7 @@ mod tests {
     }
 
     fn send_request(socket_path: &Path, request: IpcRequest, ipc_protocol_version: u16) -> IpcResponse {
-        let mut stream = UnixStream::connect(socket_path).unwrap();
+        let mut stream = local_ipc::connect(socket_path).unwrap();
         let envelope = IpcEnvelope {
             ipc_protocol_version,
             request_id: RequestId("req-1".into()),
@@ -288,7 +372,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
         let response = send_request(&socket_path, IpcRequest::Status, IPC_PROTOCOL_VERSION);
@@ -311,7 +395,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
         let response = send_request(&socket_path, IpcRequest::Status, IPC_PROTOCOL_VERSION + 1);
@@ -340,14 +424,15 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
-        let mut stream = UnixStream::connect(&socket_path).unwrap();
+        let mut stream = local_ipc::connect(&socket_path).unwrap();
         ferry_net::framing::write_frame(&mut stream, b"not json").unwrap();
         stream.flush().unwrap();
         let mut buf = [0u8; 1];
-        assert_eq!(stream.read(&mut buf).unwrap(), 0, "the server must close the connection, not respond to garbage");
+        let closed = matches!(stream.read(&mut buf), Ok(0) | Err(_));
+        assert!(closed, "the server must close the connection, not respond to garbage");
 
         let response = send_request(&socket_path, IpcRequest::Status, IPC_PROTOCOL_VERSION);
         assert!(matches!(
@@ -377,7 +462,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, store_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
             store
         });
 
@@ -455,10 +540,10 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, store_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &bus_for_server, &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &bus_for_server, &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
-        let mut sub = UnixStream::connect(&socket_path).unwrap();
+        let mut sub = local_ipc::connect(&socket_path).unwrap();
         let sub_envelope = IpcEnvelope {
             ipc_protocol_version: IPC_PROTOCOL_VERSION,
             request_id: RequestId("sub".into()),
@@ -534,7 +619,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, payload_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
         let list_response = send_request(&socket_path, IpcRequest::InboxList, IPC_PROTOCOL_VERSION);

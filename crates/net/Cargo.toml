@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 ferry-proto = { path = "../proto" }
+interprocess = "2.4.3"
 mdns-sd = "0.21.0"
 snow = "0.10.0"
 thiserror = "2.0.20"

@@ -59,13 +59,18 @@ describe("translate", () => {
 
 describe("locale detection", () => {
   beforeEach(() => {
-    localStorage.clear();
     vi.unstubAllGlobals();
+    try {
+      localStorage.clear();
+    } catch {
+      void 0;
+    }
   });
 
   it("isLocale accepts known tags only", () => {
     expect(isLocale("fr")).toBe(true);
-    expect(isLocale("es")).toBe(false);
+    expect(isLocale("es")).toBe(true);
+    expect(isLocale("tlh")).toBe(false);
     expect(isLocale(null)).toBe(false);
   });
 
@@ -75,14 +80,32 @@ describe("locale detection", () => {
   });
 
   it("falls back to the navigator language", () => {
-    localStorage.clear();
+    try {
+      localStorage.clear();
+    } catch {
+      void 0;
+    }
     vi.stubGlobal("navigator", { language: "fr-FR", languages: ["fr-FR", "en"] });
     expect(detectLocale()).toBe("fr");
   });
 
-  it("defaults to English for an unsupported navigator language", () => {
-    localStorage.clear();
+  it("maps a regional navigator tag to its base locale", () => {
+    try {
+      localStorage.clear();
+    } catch {
+      void 0;
+    }
     vi.stubGlobal("navigator", { language: "pt-BR", languages: ["pt-BR"] });
+    expect(detectLocale()).toBe("pt");
+  });
+
+  it("defaults to English for an unsupported navigator language", () => {
+    try {
+      localStorage.clear();
+    } catch {
+      void 0;
+    }
+    vi.stubGlobal("navigator", { language: "is-IS", languages: ["is-IS"] });
     expect(detectLocale()).toBe("en");
   });
 });

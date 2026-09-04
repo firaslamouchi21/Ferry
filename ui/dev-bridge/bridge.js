@@ -12,7 +12,7 @@ export function defaultSocketPath() {
     return path.join(home, "Library", "Application Support", "dev.ferry.ferry", "ferry.sock");
   }
   if (process.platform === "win32") {
-    return path.join(process.env.APPDATA ?? home, "ferry", "ferry", "data", "ferry.sock");
+    return "\\\\.\\pipe\\ferry.sock";
   }
   const base = process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
   return path.join(base, "ferry", "ferry.sock");

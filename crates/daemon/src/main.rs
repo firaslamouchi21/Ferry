@@ -42,6 +42,14 @@ enum BootError {
     Ipc(#[from] ferry_daemon::ipc_server::IpcServerError),
 }
 
+fn read_hostname() -> Option<String> {
+    #[cfg(windows)]
+    let raw = std::env::var("COMPUTERNAME").ok();
+    #[cfg(not(windows))]
+    let raw = std::fs::read_to_string("/etc/hostname").ok();
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 fn load_raw_config(data_dir: &Path) -> Result<RawConfig, BootError> {
     let config_path = data_dir.join("config.toml");
     match fs::read_to_string(&config_path) {
@@ -132,7 +140,7 @@ fn boot() -> Result<(), BootError> {
     let socket_for_signal = socket_path.clone();
     if let Err(err) = ctrlc::set_handler(move || {
         eprintln!("ferry-daemon: received interrupt — shutting down");
-        let _ = fs::remove_file(&socket_for_signal);
+        ferry_net::local_ipc::cleanup(&socket_for_signal);
         std::process::exit(0);
     }) {
         eprintln!("ferry-daemon: could not install a signal handler: {err}");
@@ -143,6 +151,7 @@ fn boot() -> Result<(), BootError> {
 
     let local_keys = ipc_store.static_keypair();
     let fingerprint = ipc_store.identity().fingerprint();
+    let auto_accept = config.auto_accept_from_roster;
 
     let transport_ok = match ferry_daemon::p2p::bind(config.listen_port) {
         Ok(p2p_listener) => {
@@ -157,6 +166,7 @@ fn boot() -> Result<(), BootError> {
                     &mut p2p_store,
                     &clock,
                     peer_id_for,
+                    auto_accept,
                     &emit,
                 ) {
                     eprintln!("ferry-daemon: P2P listener stopped: {err}");
@@ -206,11 +216,7 @@ fn boot() -> Result<(), BootError> {
         }
     };
 
-    let display_name = std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "this device".to_string());
+    let display_name = read_hostname().unwrap_or_else(|| "this device".to_string());
     let runtime = ferry_core::ipc::RuntimeStatus {
         transport_ok,
         discovery_ok,
@@ -235,7 +241,8 @@ fn boot() -> Result<(), BootError> {
     println!("transport_ok={transport_ok} discovery_ok={discovery_ok}");
 
     let mut ipc_source = ferry_daemon::file_source::FilePathSource::new(ipc_store.identity().clone());
-    ferry_daemon::ipc_server::serve(&listener, &mut ipc_store, &clock, &runtime, &event_bus, &mut ipc_source)?;
+    let pairing = ferry_daemon::pairing::PairingRegistry::new(ipc_store.identity().clone());
+    ferry_daemon::ipc_server::serve(&listener, &mut ipc_store, &clock, &runtime, &event_bus, &pairing, &mut ipc_source)?;
     let _ = std::fs::remove_file(&socket_path);
 
     Ok(())

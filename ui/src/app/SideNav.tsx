@@ -21,10 +21,13 @@ export function SideNav() {
   const version = status.data?.protocol_version;
 
   return (
-    <nav className="sidenav" aria-label="Primary">
+    <nav className="sidenav" aria-label={t("nav.primary")}>
       <div className="sidenav-head">
         <div className="brand">
-          <span className={`daemon-dot ${online ? "on" : "off"}`} title="Daemon status" />
+          <span
+            className={`daemon-dot ${online ? "on" : "off"}`}
+            title={online ? t("nav.connected") : phase === "connecting" ? t("nav.connecting") : t("nav.disconnected")}
+          />
           <span className="brand-name">{t("app.name")}</span>
         </div>
         <div className="brand-sub mono">
@@ -54,11 +57,16 @@ export function SideNav() {
       </div>
 
       <div className="sidenav-foot">
-        <a className="nav-item" href="https://github.com/ferry" target="_blank" rel="noreferrer">
+        <a className="nav-item" href="https://github.com/firaslamouchi21/Ferry#readme" target="_blank" rel="noreferrer">
           <BookText size={16} />
           <span>{t("app.docs")}</span>
         </a>
-        <a className="nav-item" href="https://github.com/ferry/issues" target="_blank" rel="noreferrer">
+        <a
+          className="nav-item"
+          href="https://github.com/firaslamouchi21/Ferry/issues"
+          target="_blank"
+          rel="noreferrer"
+        >
           <LifeBuoy size={16} />
           <span>{t("app.support")}</span>
         </a>

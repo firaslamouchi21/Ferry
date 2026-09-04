@@ -108,16 +108,24 @@ export function PeersScreen() {
                 {
                   key: "status",
                   header: t("peers.colStatus"),
-                  render: (p) => (
-                    <span className="cell-status">
-                      <StatusChip tone={p.reachable ? "online" : "offline"}>
-                        {p.reachable ? t("common.online") : t("common.offline")}
-                      </StatusChip>
-                      <span className="muted">
-                        <RelativeTime millis={p.last_seen_millis == null ? null : num(p.last_seen_millis)} />
+                  render: (p) => {
+                    const seen = p.last_seen_millis == null ? null : num(p.last_seen_millis);
+                    const veryRecent = seen != null && Date.now() - seen < 45_000;
+                    const tone = veryRecent ? "online" : p.reachable ? "warn" : "offline";
+                    const label = veryRecent
+                      ? t("common.online")
+                      : p.reachable
+                        ? t("peers.recentlySeen")
+                        : t("common.offline");
+                    return (
+                      <span className="cell-status">
+                        <StatusChip tone={tone}>{label}</StatusChip>
+                        <span className="muted">
+                          <RelativeTime millis={seen} />
+                        </span>
                       </span>
-                    </span>
-                  ),
+                    );
+                  },
                 },
                 {
                   key: "actions",
@@ -126,8 +134,7 @@ export function PeersScreen() {
                   render: (p) => (
                     <span className="row-actions">
                       <Button
-                        disabled={!p.reachable}
-                        title={p.reachable ? t("peers.sendToPeer") : t("peers.peerMustBeOnline")}
+                        title={p.reachable ? t("peers.sendToPeer") : t("peers.sendWhenOffline")}
                         onClick={() => navigate(`/send?peer=${encodeURIComponent(p.peer_id)}`)}
                       >
                         <Send size={13} /> {t("peers.send")}

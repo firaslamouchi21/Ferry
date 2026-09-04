@@ -10,13 +10,20 @@ use crate::seal::{self, SealError};
 pub const DEK_BYTES: usize = 32;
 const NONCE_LEN: usize = 24;
 
+#[cfg(not(windows))]
 fn lock_memory<T>(ptr: *const T, len: usize) -> Option<region::LockGuard> {
     region::lock(ptr, len).ok()
 }
 
+#[cfg(windows)]
+fn lock_memory<T>(ptr: *const T, len: usize) -> Option<region::LockGuard> {
+    let _ = (ptr, len);
+    None
+}
+
 pub struct DataEncryptionKey {
-    bytes: [u8; DEK_BYTES],
     _lock: Option<region::LockGuard>,
+    bytes: Box<[u8; DEK_BYTES]>,
 }
 
 impl DataEncryptionKey {
@@ -27,8 +34,9 @@ impl DataEncryptionKey {
     }
 
     fn from_bytes(bytes: [u8; DEK_BYTES]) -> Self {
-        let lock = lock_memory(bytes.as_ptr(), bytes.len());
-        Self { bytes, _lock: lock }
+        let bytes = Box::new(bytes);
+        let lock = lock_memory(bytes.as_ptr(), DEK_BYTES);
+        Self { _lock: lock, bytes }
     }
 }
 
@@ -39,14 +47,14 @@ impl Drop for DataEncryptionKey {
 }
 
 pub struct Plaintext {
-    bytes: Vec<u8>,
     _lock: Option<region::LockGuard>,
+    bytes: Vec<u8>,
 }
 
 impl Plaintext {
     fn new(bytes: Vec<u8>) -> Self {
         let lock = lock_memory(bytes.as_ptr(), bytes.len());
-        Self { bytes, _lock: lock }
+        Self { _lock: lock, bytes }
     }
 
     pub fn expose(&self) -> &[u8] {
@@ -79,7 +87,7 @@ pub enum SecretCryptoError {
 }
 
 pub fn wrap_dek(recipient: &Recipient, dek: &DataEncryptionKey) -> Result<Vec<u8>, SecretCryptoError> {
-    Ok(seal::seal(recipient, &dek.bytes)?)
+    Ok(seal::seal(recipient, &dek.bytes[..])?)
 }
 
 pub fn unwrap_dek(identity: &SealingIdentity, wrapped: &[u8]) -> Result<DataEncryptionKey, SecretCryptoError> {
@@ -96,7 +104,7 @@ pub fn unwrap_dek(identity: &SealingIdentity, wrapped: &[u8]) -> Result<DataEncr
 }
 
 pub fn encrypt_chunk(dek: &DataEncryptionKey, plaintext: &[u8]) -> Result<Vec<u8>, SecretCryptoError> {
-    let cipher = XChaCha20Poly1305::new(&Key::from(dek.bytes));
+    let cipher = XChaCha20Poly1305::new(&Key::from(*dek.bytes));
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = XNonce::from_slice(&nonce_bytes);
@@ -114,7 +122,7 @@ pub fn decrypt_chunk(dek: &DataEncryptionKey, framed: &[u8]) -> Result<Plaintext
         return Err(SecretCryptoError::ChunkTooShort);
     }
     let (nonce_bytes, ciphertext) = framed.split_at(NONCE_LEN);
-    let cipher = XChaCha20Poly1305::new(&Key::from(dek.bytes));
+    let cipher = XChaCha20Poly1305::new(&Key::from(*dek.bytes));
     let nonce = XNonce::from_slice(nonce_bytes);
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
@@ -188,6 +196,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn a_freshly_generated_key_is_actually_memory_locked_on_this_platform() {
         let dek = DataEncryptionKey::generate();
         assert!(
@@ -198,6 +207,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn decrypted_plaintext_is_actually_memory_locked_on_this_platform() {
         let dek = DataEncryptionKey::generate();
         let framed = encrypt_chunk(&dek, b"lock me").unwrap();

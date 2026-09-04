@@ -2,7 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use ferry_net::chunk::{resume_seq_from_offset, Chunker, DEFAULT_CHUNK_BYTES};
 use ferry_proto::envelope::{
-    Accept, Chunk as ChunkMsg, Delivered, Done, Envelope, Offer, Opened, WireMessage,
+    Accept, Chunk as ChunkMsg, Delivered, Done, Envelope, Offer, Opened, Reject, WireMessage,
     PROTOCOL_VERSION,
 };
 use ferry_proto::ids::ItemId;
@@ -41,6 +41,10 @@ pub enum TransferError {
     DeclaredSizeExceeded { item_id: String, declared: u64 },
     #[error("inbound item rejected by policy: {0}")]
     Policy(#[from] crate::policy::PolicyError),
+    #[error("the receiver declined item {0}")]
+    DeclinedByReceiver(String),
+    #[error("item {0} is awaiting a local accept/reject decision")]
+    AwaitingDecision(String),
 }
 
 pub fn send_message(channel: &mut impl Channel, message: WireMessage) -> Result<(), TransferError> {
@@ -144,6 +148,15 @@ pub fn send_opened(channel: &mut impl Channel, item_id: &str) -> Result<(), Tran
     )
 }
 
+pub fn send_reject(channel: &mut impl Channel, item_id: &str) -> Result<(), TransferError> {
+    send_message(
+        channel,
+        WireMessage::Reject(Reject {
+            item_id: ItemId(item_id.to_string()),
+        }),
+    )
+}
+
 fn transition_outbound(
     store: &mut impl Store,
     item_id: &str,
@@ -199,6 +212,15 @@ pub fn send_item_reporting(
 
     let accept = match recv_message(channel)? {
         WireMessage::Accept(accept) if accept.item_id.0 == item_id => accept,
+        WireMessage::Reject(reject) if reject.item_id.0 == item_id => {
+            let current = store
+                .get_outbound_state(item_id)?
+                .ok_or_else(|| TransferError::UnknownItem(item_id.to_string()))?;
+            if TRANSFER_TRANSITIONS.validate(current, TransferState::Failed).is_ok() {
+                store.set_outbound_state(item_id, TransferState::Failed)?;
+            }
+            return Err(TransferError::DeclinedByReceiver(item_id.to_string()));
+        }
         other => return Err(TransferError::UnexpectedMessage(format!("{other:?}"))),
     };
 
@@ -257,7 +279,15 @@ pub fn receive_item(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboundEvent {
     ItemDelivered(Offer),
+    OfferPending(Offer),
+    OfferDeclined(String),
     OpenReceipt(String),
+}
+
+enum OfferedOutcome {
+    Delivered(Offer),
+    Pending(Offer),
+    Declined(String),
 }
 
 pub fn receive_next_inbound(
@@ -266,12 +296,16 @@ pub fn receive_next_inbound(
     clock: &ExpiryClock,
     peer_id: &str,
     actor: &str,
+    auto_accept: bool,
     on_progress: &mut dyn FnMut(&str, u64, u64),
 ) -> Result<InboundEvent, TransferError> {
     match recv_message(channel)? {
         WireMessage::Offer(offer) => {
-            receive_offered_item(channel, store, clock, peer_id, actor, offer, on_progress)
-                .map(InboundEvent::ItemDelivered)
+            match receive_offered_item(channel, store, clock, peer_id, actor, offer, auto_accept, on_progress)? {
+                OfferedOutcome::Delivered(offer) => Ok(InboundEvent::ItemDelivered(offer)),
+                OfferedOutcome::Pending(offer) => Ok(InboundEvent::OfferPending(offer)),
+                OfferedOutcome::Declined(item_id) => Ok(InboundEvent::OfferDeclined(item_id)),
+            }
         }
         WireMessage::Opened(opened) => {
             let item_id = opened.item_id.0;
@@ -298,9 +332,14 @@ pub fn receive_item_reporting(
         WireMessage::Offer(offer) => offer,
         other => return Err(TransferError::UnexpectedMessage(format!("{other:?}"))),
     };
-    receive_offered_item(channel, store, clock, peer_id, actor, offer, on_progress)
+    match receive_offered_item(channel, store, clock, peer_id, actor, offer, true, on_progress)? {
+        OfferedOutcome::Delivered(offer) => Ok(offer),
+        OfferedOutcome::Pending(offer) => Err(TransferError::AwaitingDecision(offer.item_id.0)),
+        OfferedOutcome::Declined(item_id) => Err(TransferError::DeclinedByReceiver(item_id)),
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn receive_offered_item(
     channel: &mut impl Channel,
     store: &mut impl Store,
@@ -308,25 +347,40 @@ fn receive_offered_item(
     peer_id: &str,
     actor: &str,
     offer: Offer,
+    auto_accept: bool,
     on_progress: &mut dyn FnMut(&str, u64, u64),
-) -> Result<Offer, TransferError> {
+) -> Result<OfferedOutcome, TransferError> {
     let item_id = offer.item_id.0.clone();
 
     crate::policy::authorize_item_kind(offer.kind, offer.size_bytes)?;
 
     store.create_inbound(&offer, peer_id, actor)?;
-    let offset = store.inbound_bytes_received(&item_id)?;
 
     let current = store
         .get_inbound_state(&item_id)?
         .ok_or_else(|| TransferError::UnknownItem(item_id.clone()))?;
-    if current == TransferState::Offered {
-        transition_inbound(store, &item_id, TransferState::Accepted)?;
-        transition_inbound(store, &item_id, TransferState::Transferring)?;
-    } else if current != TransferState::Transferring {
-        TRANSFER_TRANSITIONS.validate(current, TransferState::Transferring)?;
+    match current {
+        TransferState::Offered => {
+            if !auto_accept {
+                return Ok(OfferedOutcome::Pending(offer));
+            }
+            transition_inbound(store, &item_id, TransferState::Accepted)?;
+            transition_inbound(store, &item_id, TransferState::Transferring)?;
+        }
+        TransferState::Accepted => {
+            transition_inbound(store, &item_id, TransferState::Transferring)?;
+        }
+        TransferState::Transferring => {}
+        TransferState::Failed => {
+            send_reject(channel, &item_id)?;
+            return Ok(OfferedOutcome::Declined(item_id));
+        }
+        other => {
+            TRANSFER_TRANSITIONS.validate(other, TransferState::Transferring)?;
+        }
     }
 
+    let offset = store.inbound_bytes_received(&item_id)?;
     send_accept(channel, &item_id, offset)?;
 
     loop {
@@ -367,7 +421,7 @@ fn receive_offered_item(
     store.finalize_inbound_delivered(&item_id)?;
     store.set_inbound_expiry(&item_id, &clock.compute_deadline(offer.ttl_secs))?;
     send_delivered(channel, &item_id)?;
-    Ok(offer)
+    Ok(OfferedOutcome::Delivered(offer))
 }
 
 pub fn expire_if_due(
@@ -1051,7 +1105,7 @@ mod tests {
 
         let mut store = FakeStore::with_outbound("item-1", TransferState::Delivered);
         let clock = ExpiryClock::new();
-        let event = receive_next_inbound(&mut our_channel, &mut store, &clock, "peer-a", "local", &mut |_, _, _| {}).unwrap();
+        let event = receive_next_inbound(&mut our_channel, &mut store, &clock, "peer-a", "local", true, &mut |_, _, _| {}).unwrap();
 
         assert_eq!(event, InboundEvent::OpenReceipt("item-1".to_string()));
         assert_eq!(store.outbound["item-1"], TransferState::Opened);
@@ -1069,7 +1123,7 @@ mod tests {
 
         let mut store = FakeStore::with_outbound("item-1", TransferState::Opened);
         let clock = ExpiryClock::new();
-        let event = receive_next_inbound(&mut our_channel, &mut store, &clock, "peer-a", "local", &mut |_, _, _| {}).unwrap();
+        let event = receive_next_inbound(&mut our_channel, &mut store, &clock, "peer-a", "local", true, &mut |_, _, _| {}).unwrap();
         assert_eq!(event, InboundEvent::OpenReceipt("item-1".to_string()));
     }
 
@@ -1085,7 +1139,7 @@ mod tests {
 
         let mut store = FakeStore::default();
         let clock = ExpiryClock::new();
-        let result = receive_next_inbound(&mut our_channel, &mut store, &clock, "peer-a", "local", &mut |_, _, _| {});
+        let result = receive_next_inbound(&mut our_channel, &mut store, &clock, "peer-a", "local", true, &mut |_, _, _| {});
         assert!(matches!(result, Err(TransferError::UnknownItem(_))));
     }
 

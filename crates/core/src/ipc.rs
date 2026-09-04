@@ -148,6 +148,12 @@ pub fn handle(
         IpcRequest::Subscribe => internal_error(
             "Subscribe is handled by the IPC server's event stream, not the request dispatcher".into(),
         ),
+        IpcRequest::PairBegin { .. }
+        | IpcRequest::PairStatus { .. }
+        | IpcRequest::PairConfirm { .. }
+        | IpcRequest::PairCancel { .. } => internal_error(
+            "pairing requests are handled by the daemon's pairing registry, not the request dispatcher".into(),
+        ),
     };
 
     IpcResponse { request_id, outcome }

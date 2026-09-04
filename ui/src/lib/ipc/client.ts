@@ -12,6 +12,9 @@ import {
   type IpcRequest,
   type IpcResult,
   type ItemKind,
+  type PairBeginView,
+  type PairMode,
+  type PairStatusView,
   type RosterImportSummaryView,
   type RosterPeerView,
   type SealedImportView,
@@ -206,6 +209,24 @@ export class FerryClient {
 
   async pairComplete(params: Extract<IpcRequest, { method: "pair_complete" }>["params"]): Promise<void> {
     await this.call({ method: "pair_complete", params });
+  }
+
+  async pairBegin(mode: PairMode): Promise<PairBeginView> {
+    const r = await this.call({ method: "pair_begin", params: { mode } });
+    return (r as Extract<IpcResult, { result: "pair_begin" }>).value;
+  }
+
+  async pairStatus(pairingId: string): Promise<PairStatusView> {
+    const r = await this.call({ method: "pair_status", params: { pairing_id: pairingId } });
+    return (r as Extract<IpcResult, { result: "pair_status" }>).value;
+  }
+
+  async pairConfirm(pairingId: string, accept: boolean): Promise<void> {
+    await this.call({ method: "pair_confirm", params: { pairing_id: pairingId, accept } });
+  }
+
+  async pairCancel(pairingId: string): Promise<void> {
+    await this.call({ method: "pair_cancel", params: { pairing_id: pairingId } });
   }
 
   async quit(): Promise<void> {

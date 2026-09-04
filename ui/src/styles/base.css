@@ -95,3 +95,15 @@ code,
 ::-webkit-scrollbar-thumb:hover {
   background: var(--outline);
 }
+
+[dir="rtl"] .lucide-arrow-left,
+[dir="rtl"] .lucide-arrow-right,
+[dir="rtl"] .lucide-chevron-left,
+[dir="rtl"] .lucide-chevron-right {
+  transform: scaleX(-1);
+}
+
+:lang(ja),
+:lang(zh) {
+  line-height: 1.7;
+}

@@ -3,9 +3,11 @@ import type { AuditEventView } from "./AuditEventView";
 import type { DaemonStatus } from "./DaemonStatus";
 import type { IdentityView } from "./IdentityView";
 import type { InboxItemView } from "./InboxItemView";
+import type { PairBeginView } from "./PairBeginView";
+import type { PairStatusView } from "./PairStatusView";
 import type { RosterImportSummaryView } from "./RosterImportSummaryView";
 import type { RosterPeerView } from "./RosterPeerView";
 import type { SealedImportView } from "./SealedImportView";
 import type { SentItemView } from "./SentItemView";
 
-export type IpcResult = { "result": "status", "value": DaemonStatus } | { "result": "ack" } | { "result": "roster_list", "value": Array<RosterPeerView> } | { "result": "roster_export", "value": { signed_roster_json: string, } } | { "result": "roster_import", "value": RosterImportSummaryView } | { "result": "send", "value": { item_id: string, } } | { "result": "inbox_list", "value": Array<InboxItemView> } | { "result": "open", "value": { content_base64: string, } } | { "result": "export_sealed", "value": { blob_base64: string, } } | { "result": "import_sealed", "value": SealedImportView } | { "result": "identity", "value": IdentityView } | { "result": "sent_list", "value": Array<SentItemView> } | { "result": "audit_list", "value": Array<AuditEventView> };
+export type IpcResult = { "result": "status", "value": DaemonStatus } | { "result": "ack" } | { "result": "roster_list", "value": Array<RosterPeerView> } | { "result": "roster_export", "value": { signed_roster_json: string, } } | { "result": "roster_import", "value": RosterImportSummaryView } | { "result": "send", "value": { item_id: string, } } | { "result": "inbox_list", "value": Array<InboxItemView> } | { "result": "open", "value": { content_base64: string, } } | { "result": "export_sealed", "value": { blob_base64: string, } } | { "result": "import_sealed", "value": SealedImportView } | { "result": "identity", "value": IdentityView } | { "result": "sent_list", "value": Array<SentItemView> } | { "result": "audit_list", "value": Array<AuditEventView> } | { "result": "pair_begin", "value": PairBeginView } | { "result": "pair_status", "value": PairStatusView };

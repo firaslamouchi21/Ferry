@@ -1,10 +1,13 @@
 {
-  "name": "@ferry/ext-vscode",
+  "name": "ferry-vscode",
   "displayName": "Ferry",
   "description": "Serverless peer-to-peer file, secret, and message transfer for developer teams",
   "private": true,
   "version": "0.1.0",
   "type": "commonjs",
+  "publisher": "ferry",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/firaslamouchi21/Ferry.git" },
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Other"],
   "main": "./dist/extension.js",
@@ -46,11 +49,13 @@
   },
   "scripts": {
     "build": "pnpm --filter @ferry/ui build && node esbuild.mjs",
-    "watch": "node esbuild.mjs --watch"
+    "watch": "node esbuild.mjs --watch",
+    "package": "pnpm run build && vsce package --no-dependencies -o ferry.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.21.5",
     "typescript": "^5.6.3"
   }

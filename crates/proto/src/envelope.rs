@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::ItemId;
 use crate::states::ItemKind;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Offer {
@@ -47,6 +47,11 @@ pub struct Opened {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reject {
+    pub item_id: ItemId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WireMessage {
     Offer(Offer),
     Accept(Accept),
@@ -54,6 +59,7 @@ pub enum WireMessage {
     Done(Done),
     Delivered(Delivered),
     Opened(Opened),
+    Reject(Reject),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

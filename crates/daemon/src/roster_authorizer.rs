@@ -27,8 +27,16 @@ mod tests {
     use super::*;
     use ferry_crypto::identity::Identity;
     use ferry_net::transport::{accept_responder, connect_initiator, StaticKeypair};
-    use std::os::unix::net::UnixStream;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
+
+    fn stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let a = TcpStream::connect(addr).unwrap();
+        let (b, _) = listener.accept().unwrap();
+        (a, b)
+    }
 
     fn static_keypair_for(identity: &Identity) -> StaticKeypair {
         StaticKeypair {
@@ -106,7 +114,7 @@ mod tests {
         let initiator_keys = static_keypair_for(&initiator_identity);
         let responder_public = responder_keys.public;
 
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
 
         let responder_thread = thread::spawn(move || {
             let conn_for_thread = conn;
@@ -137,7 +145,7 @@ mod tests {
         let stranger_keys = static_keypair_for(&stranger_identity);
         let responder_public = responder_keys.public;
 
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
 
         let responder_thread = thread::spawn(move || {
             let conn_for_thread = conn;

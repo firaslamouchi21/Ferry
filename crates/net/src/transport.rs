@@ -143,12 +143,20 @@ fn finish_handshake<S: Read + Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixStream;
+    use std::net::{TcpListener, TcpStream};
     use std::thread;
+
+    fn stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let a = TcpStream::connect(addr).unwrap();
+        let (b, _) = listener.accept().unwrap();
+        (a, b)
+    }
 
     #[test]
     fn authorized_peers_complete_handshake_and_exchange_messages() {
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
         let initiator_keys = generate_keypair();
         let responder_keys = generate_keypair();
         let responder_public = responder_keys.public;
@@ -177,7 +185,7 @@ mod tests {
 
     #[test]
     fn responder_rejects_a_peer_whose_static_key_is_not_authorized() {
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
         let initiator_keys = generate_keypair();
         let responder_keys = generate_keypair();
         let responder_public = responder_keys.public;
@@ -204,7 +212,7 @@ mod tests {
 
     #[test]
     fn oversize_payload_is_rejected_before_sending() {
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
         let initiator_keys = generate_keypair();
         let responder_keys = generate_keypair();
         let responder_public = responder_keys.public;
@@ -226,7 +234,7 @@ mod tests {
         use std::io::Write;
         use std::time::{Duration, Instant};
 
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
         let initiator_keys = generate_keypair();
         let responder_keys = generate_keypair();
         let responder_public = responder_keys.public;

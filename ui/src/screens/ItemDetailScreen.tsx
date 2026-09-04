@@ -8,7 +8,7 @@ import {
   useInboxItem,
   useTransferProgress,
 } from "@/lib/query";
-import { Button, ConfirmDialog, MaskedValue, ProgressBar, StateBadge } from "@/components";
+import { Button, ConfirmDialog, ErrorState, MaskedValue, ProgressBar, Skeleton, StateBadge } from "@/components";
 import { num, optNum, type TransferState } from "@/lib/ipc";
 import { decodeBase64, formatClock, useFormat } from "@/lib/format";
 import { useT, useTParts } from "@/lib/i18n";
@@ -30,7 +30,20 @@ export function ItemDetailScreen() {
   const [content, setContent] = useState<string | null>(null);
   const [confirmBurn, setConfirmBurn] = useState(false);
 
-  if (item.isLoading) return <div className="screen">{t("common.loading")}</div>;
+  if (item.isLoading) {
+    return (
+      <div className="screen">
+        <Skeleton rows={6} />
+      </div>
+    );
+  }
+  if (item.isError) {
+    return (
+      <div className="screen">
+        <ErrorState error={item.error} onRetry={() => void item.refetch()} />
+      </div>
+    );
+  }
   if (!item.data) {
     return (
       <div className="screen">

@@ -43,14 +43,18 @@ export function formatRelative(millis: number | null | undefined, locale: Locale
   return rtf.format(Math.round(delta / 86_400_000), "day");
 }
 
-export function formatClock(millis: number | null | undefined): string {
+export function formatClock(millis: number | null | undefined, locale?: string): string {
   if (millis == null) return "—";
-  return new Date(millis).toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+  return new Intl.DateTimeFormat(locale, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+    timeZoneName: "short",
+  }).format(new Date(millis));
 }
 
-export function formatTime(millis: number | null | undefined): string {
+export function formatTime(millis: number | null | undefined, locale?: string): string {
   if (millis == null) return "—";
-  return new Date(millis).toISOString().slice(11, 23);
+  return new Intl.DateTimeFormat(locale, { timeStyle: "medium" }).format(new Date(millis));
 }
 
 export function useFormat() {
@@ -59,8 +63,8 @@ export function useFormat() {
     () => ({
       bytes: (n: number) => formatBytes(n, locale),
       relative: (m: number | null | undefined) => formatRelative(m, locale),
-      clock: formatClock,
-      time: formatTime,
+      clock: (m: number | null | undefined) => formatClock(m, locale),
+      time: (m: number | null | undefined) => formatTime(m, locale),
     }),
     [locale],
   );

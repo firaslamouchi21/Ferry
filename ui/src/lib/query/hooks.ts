@@ -6,6 +6,7 @@ import {
 } from "@tanstack/react-query";
 import { useFerryClient, type TransferProgress } from "./provider";
 import { queryKeys } from "./keys";
+import { pushToast } from "@/lib/toast";
 import type { SendFileParams, SendInlineParams } from "@/lib/ipc";
 
 export function useDaemonStatus() {
@@ -57,6 +58,9 @@ function useInvalidating<TArgs, TResult>(
     mutationFn: fn,
     onSuccess: () => {
       for (const key of keys) void client.invalidateQueries({ queryKey: key });
+    },
+    onError: (error) => {
+      pushToast(error instanceof Error ? error.message : String(error), "error");
     },
   });
 }
