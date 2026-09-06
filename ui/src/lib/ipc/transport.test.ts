@@ -51,7 +51,7 @@ const okResponse = (id: string) => ({
     request_id: id,
     outcome: {
       outcome: "ok",
-      value: { result: "status", value: { protocol_version: 1, discovery_ok: true, transport_ok: true, store_ok: true } },
+      value: { result: "status", value: { protocol_version: 1, ipc_protocol_version: 1, discovery_ok: true, transport_ok: true, store_ok: true } },
     },
   },
 });

@@ -46,8 +46,12 @@ export function formatRelative(millis: number | null | undefined, locale: Locale
 export function formatClock(millis: number | null | undefined, locale?: string): string {
   if (millis == null) return "—";
   return new Intl.DateTimeFormat(locale, {
-    dateStyle: "medium",
-    timeStyle: "medium",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
     timeZoneName: "short",
   }).format(new Date(millis));
 }

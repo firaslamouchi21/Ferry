@@ -247,7 +247,7 @@ export class MockTransport implements Transport {
       case "status":
         return ok({
           result: "status",
-          value: { protocol_version: 1, discovery_ok: true, transport_ok: true, store_ok: true },
+          value: { protocol_version: 1, ipc_protocol_version: 1, discovery_ok: true, transport_ok: true, store_ok: true },
         })(id);
       case "identity":
         return ok({ result: "identity", value: identity })(id);

@@ -106,8 +106,19 @@ function handleConnection(ws, socketPath) {
 
 export function attachBridge(httpServer, opts = {}) {
   const socketPath = opts.socketPath ?? defaultSocketPath();
-  const wss = new WebSocketServer({ server: httpServer, path: "/ferry-ipc" });
+  const wss = new WebSocketServer({ noServer: true });
   wss.on("connection", (ws) => handleConnection(ws, socketPath));
+  wss.on("error", () => {});
+  httpServer.on("upgrade", (req, socket, head) => {
+    let pathname;
+    try {
+      pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      return;
+    }
+    if (pathname !== "/ferry-ipc") return;
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
   return wss;
 }
 

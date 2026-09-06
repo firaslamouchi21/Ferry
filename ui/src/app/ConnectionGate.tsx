@@ -25,7 +25,7 @@ export function ConnectionGate({ children }: { children: ReactNode }) {
     );
   }
 
-  const daemonVersion = status.data?.protocol_version;
+  const daemonVersion = status.data?.ipc_protocol_version;
   if (daemonVersion != null && daemonVersion !== IPC_PROTOCOL_VERSION) {
     return (
       <GateScreen

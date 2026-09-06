@@ -57,9 +57,26 @@ export class WebSocketTransport implements Transport {
 
   stop() {
     this.stopped = true;
-    this.ws?.close();
+    this.teardown(this.ws);
     this.ws = null;
     this.setPhase("disconnected");
+  }
+
+  private teardown(ws: WebSocket | null) {
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.onmessage = null;
+    try {
+      if (ws.readyState === 0) {
+        ws.addEventListener("open", () => ws.close());
+      } else {
+        ws.close();
+      }
+    } catch {
+      this.ws = null;
+    }
   }
 
   private connect() {
@@ -69,12 +86,14 @@ export class WebSocketTransport implements Transport {
     this.ws = ws;
 
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       this.reconnectDelay = 500;
       this.setPhase("connected");
       this.openSubscription();
     };
 
     ws.onclose = () => {
+      if (this.ws !== ws) return;
       this.ws = null;
       this.failAllPending(new Error("bridge connection closed"));
       this.setPhase("disconnected");
@@ -87,6 +106,7 @@ export class WebSocketTransport implements Transport {
     ws.onerror = () => ws.close();
 
     ws.onmessage = (raw) => {
+      if (this.ws !== ws) return;
       let msg: BridgeMessage;
       try {
         msg = JSON.parse(typeof raw.data === "string" ? raw.data : "");

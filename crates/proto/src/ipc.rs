@@ -151,6 +151,7 @@ pub struct IpcEnvelope {
 #[ts(export, export_to = "../../../bindings/")]
 pub struct DaemonStatus {
     pub protocol_version: u16,
+    pub ipc_protocol_version: u16,
     pub discovery_ok: bool,
     pub transport_ok: bool,
     pub store_ok: bool,

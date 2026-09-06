@@ -164,6 +164,7 @@ fn status_outcome(store: &impl Store, runtime: &RuntimeStatus) -> IpcOutcome {
     IpcOutcome::Ok {
         value: IpcResult::Status(DaemonStatus {
             protocol_version: PROTOCOL_VERSION,
+            ipc_protocol_version: IPC_PROTOCOL_VERSION,
             discovery_ok: runtime.discovery_ok,
             transport_ok: runtime.transport_ok,
             store_ok,
