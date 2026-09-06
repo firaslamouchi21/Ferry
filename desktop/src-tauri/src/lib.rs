@@ -6,7 +6,7 @@ use ferry_net::local_ipc::{self, Stream};
 use serde_json::Value;
 use tauri::{Emitter, Manager};
 
-const MAX_FRAME_BYTES: usize = 65_535;
+const MAX_FRAME_BYTES: usize = ferry_net::framing::IPC_MAX_FRAME_BYTES;
 
 struct DaemonSocket(Mutex<Option<std::thread::JoinHandle<()>>>);
 

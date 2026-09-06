@@ -257,3 +257,113 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("ferry-daemon-boot-test-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn config_in(dir: &Path) -> Config {
+        RawConfig {
+            data_dir: Some(dir.to_path_buf()),
+            ..RawConfig::default()
+        }
+        .validate(PathBuf::from(".ferry"))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_missing_config_file_falls_back_to_defaults_rather_than_failing() {
+        let dir = TempDir::new();
+        let raw = load_raw_config(&dir.0).unwrap();
+        assert_eq!(raw.listen_port, RawConfig::default().listen_port);
+        assert!(raw.data_dir.is_none());
+        assert!(raw.auto_accept_from_roster);
+    }
+
+    #[test]
+    fn a_present_config_file_is_read_and_parsed() {
+        let dir = TempDir::new();
+        fs::write(
+            dir.0.join("config.toml"),
+            "listen_port = 51000\nauto_accept_from_roster = false\n",
+        )
+        .unwrap();
+        let raw = load_raw_config(&dir.0).unwrap();
+        assert_eq!(raw.listen_port, 51000);
+        assert!(!raw.auto_accept_from_roster);
+    }
+
+    #[test]
+    fn a_malformed_config_file_fails_fast_and_names_the_path() {
+        let dir = TempDir::new();
+        fs::write(dir.0.join("config.toml"), "listen_port = \"not a number\"\n").unwrap();
+        let err = load_raw_config(&dir.0).unwrap_err();
+        assert!(matches!(err, BootError::ParseConfig { .. }), "got {err:?}");
+        assert!(err.to_string().contains("config.toml"));
+    }
+
+    #[test]
+    fn the_first_lock_holder_wins_and_a_second_acquisition_is_refused_while_it_is_held() {
+        let dir = TempDir::new();
+        let config = config_in(&dir.0);
+
+        let first = acquire_single_instance_lock(&config).unwrap();
+
+        let second = acquire_single_instance_lock(&config);
+        assert!(
+            matches!(second, Err(BootError::AlreadyRunning(_))),
+            "a second daemon on the same data dir must be refused, not double-started"
+        );
+
+        drop(first);
+        acquire_single_instance_lock(&config).expect("the lock is reusable once the holder exits");
+    }
+
+    #[test]
+    fn acquiring_the_lock_creates_the_data_directory_when_absent() {
+        let parent = TempDir::new();
+        let data_dir = parent.0.join("nested").join("data");
+        let config = config_in(&data_dir);
+        assert!(!data_dir.exists());
+
+        let _lock = acquire_single_instance_lock(&config).unwrap();
+        assert!(data_dir.join("ferry.lock").is_file());
+    }
+
+    #[test]
+    fn lock_metadata_records_pid_and_port_and_overwrites_stale_contents() {
+        let dir = TempDir::new();
+        let config = config_in(&dir.0);
+        let lock = acquire_single_instance_lock(&config).unwrap();
+
+        write_lock_metadata(&lock, &config).unwrap();
+        write_lock_metadata(&lock, &config).unwrap();
+
+        let mut contents = String::new();
+        File::open(dir.0.join("ferry.lock"))
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+
+        assert_eq!(contents.matches("pid=").count(), 1, "stale metadata must be truncated, not appended to");
+        assert!(contents.contains(&format!("pid={}", std::process::id())));
+        assert!(contents.contains(&format!("port={}", config.listen_port)));
+    }
+}

@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::net::TcpStream;
+use std::time::Duration;
 
 use ferry_core::dispatcher::drain_outbox_for_peer_reporting;
 use ferry_core::expiry::ExpiryClock;
@@ -6,13 +8,14 @@ use ferry_core::ports::{OutboundSource, Store};
 use ferry_net::discovery::{peer_from_resolved, Discovery, DiscoveredPeer};
 use ferry_net::transport::{connect_initiator, StaticKeypair};
 use ferry_proto::ipc::{IpcEvent, IpcResource};
-use mdns_sd::ServiceEvent;
+use mdns_sd::{RecvTimeoutError, ServiceEvent};
 
 use crate::channel_adapter::NetChannel;
 use crate::event_bus::EventSink;
 use crate::presence::Presence;
 
-const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+const REDRIVE_INTERVAL: Duration = Duration::from_secs(5);
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_reappearance_loop(
@@ -33,12 +36,42 @@ pub fn run_reappearance_loop(
         }
     };
 
-    for event in events {
-        let ServiceEvent::ServiceResolved(resolved) = event else {
-            continue;
-        };
-        handle_reappeared_peer(&peer_from_resolved(&resolved), local_keys, store, clock, source, &roster_lookup, emit, presence);
+    let mut known: HashMap<String, DiscoveredPeer> = HashMap::new();
+
+    loop {
+        match events.recv_timeout(REDRIVE_INTERVAL) {
+            Ok(ServiceEvent::ServiceResolved(resolved)) => {
+                let peer = peer_from_resolved(&resolved);
+                if let Some(fingerprint) = &peer.fingerprint {
+                    known.insert(fingerprint.clone(), peer.clone());
+                }
+                handle_reappeared_peer(&peer, local_keys, store, clock, source, &roster_lookup, emit, presence);
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                for peer in known.values().cloned().collect::<Vec<_>>() {
+                    if peer_has_pending_work(store, &peer) {
+                        handle_reappeared_peer(&peer, local_keys, store, clock, source, &roster_lookup, emit, presence);
+                    }
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
     }
+}
+
+fn peer_has_pending_work(store: &impl Store, peer: &DiscoveredPeer) -> bool {
+    let Some(fingerprint) = &peer.fingerprint else {
+        return false;
+    };
+    store
+        .list_outbox_for_peer(fingerprint)
+        .map(|entries| !entries.is_empty())
+        .unwrap_or(false)
+        || store
+            .list_open_receipts_for_peer(fingerprint)
+            .map(|receipts| !receipts.is_empty())
+            .unwrap_or(false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -60,11 +93,17 @@ fn handle_reappeared_peer(
     };
     presence.seen(fingerprint);
 
-    let addr = format!("{}:{}", peer.host.trim_end_matches('.'), peer.port);
-    let stream = match TcpStream::connect(&addr) {
-        Ok(stream) => stream,
-        Err(err) => {
-            eprintln!("ferry-daemon: could not connect to reappeared peer {fingerprint} at {addr}: {err}");
+    let mut candidates: Vec<String> = peer
+        .addresses
+        .iter()
+        .map(|ip| std::net::SocketAddr::new(*ip, peer.port).to_string())
+        .collect();
+    candidates.push(format!("{}:{}", peer.host.trim_end_matches('.'), peer.port));
+
+    let stream = match candidates.iter().find_map(|addr| TcpStream::connect(addr).ok()) {
+        Some(stream) => stream,
+        None => {
+            eprintln!("ferry-daemon: could not connect to reappeared peer {fingerprint} at any of {candidates:?}");
             return;
         }
     };
@@ -191,6 +230,7 @@ mod tests {
         let peer = DiscoveredPeer {
             fullname: "receiver._ferry._tcp.local.".into(),
             host: addr.ip().to_string(),
+            addresses: vec![addr.ip()],
             port: addr.port(),
             fingerprint: Some("receiver-fp".into()),
             protocol_version: None,
@@ -220,6 +260,7 @@ mod tests {
         let peer = DiscoveredPeer {
             fullname: "stranger._ferry._tcp.local.".into(),
             host: "127.0.0.1".into(),
+            addresses: vec![],
             port: 1,
             fingerprint: Some("stranger-fp".into()),
             protocol_version: None,
@@ -235,5 +276,49 @@ mod tests {
         let clock = ExpiryClock::new();
 
         handle_reappeared_peer(&peer, &local_keys, &mut store, &clock, &mut source, &|_| None, &crate::event_bus::noop_sink, &crate::presence::Presence::new());
+    }
+
+    #[test]
+    fn peer_has_pending_work_gates_the_periodic_redrive_on_a_non_empty_outbox() {
+        use ferry_core::ports::Store;
+
+        let conn = ferry_store::connection::open_in_memory().unwrap();
+        ferry_store::roster::insert_peer(&conn, "peer-with-mail", "laptop", "sk", "xk").unwrap();
+        let mut store = crate::store_adapter::SqliteStore::new(
+            conn,
+            std::env::temp_dir().join(format!("ferry-redrive-test-{}", uuid::Uuid::now_v7())),
+            ferry_crypto::identity::Identity::generate(),
+        );
+
+        let peer = |fp: &str| DiscoveredPeer {
+            fullname: format!("{fp}._ferry._tcp.local."),
+            host: "127.0.0.1".into(),
+            addresses: vec![],
+            port: 1,
+            fingerprint: Some(fp.into()),
+            protocol_version: None,
+        };
+
+        assert!(!peer_has_pending_work(&store, &peer("peer-with-mail")));
+
+        store
+            .create_and_enqueue_outbound(
+                &NewOutboundItem {
+                    peer_id: "peer-with-mail".into(),
+                    kind: ItemKind::File,
+                    name: "notes.txt".into(),
+                    size_bytes: 3,
+                    hash: "deadbeef".into(),
+                    ttl_secs: 600,
+                    is_burn_after_read: false,
+                    notify_on_open: false,
+                    source_path: "/tmp/notes.txt".into(),
+                },
+                "local",
+            )
+            .unwrap();
+
+        assert!(peer_has_pending_work(&store, &peer("peer-with-mail")));
+        assert!(!peer_has_pending_work(&store, &peer("some-other-peer")));
     }
 }

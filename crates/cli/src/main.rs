@@ -24,6 +24,24 @@ fn print_json(value: &impl serde::Serialize) {
 
 const EXIT_UNREACHABLE: u8 = 3;
 const EXIT_PROTOCOL: u8 = 4;
+const EXIT_FAILURE: u8 = 1;
+
+fn exit_code_for_error(message: &str) -> u8 {
+    if message.starts_with("unreachable: ") {
+        EXIT_UNREACHABLE
+    } else if message.starts_with("protocol: ") {
+        EXIT_PROTOCOL
+    } else {
+        EXIT_FAILURE
+    }
+}
+
+fn user_facing_error(message: &str) -> &str {
+    message
+        .strip_prefix("unreachable: ")
+        .or_else(|| message.strip_prefix("protocol: "))
+        .unwrap_or(message)
+}
 
 #[derive(Parser)]
 #[command(name = "ferry", about = "Ferry — serverless peer-to-peer file, secret, and message transfer")]
@@ -198,10 +216,12 @@ fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
         request,
     };
     let bytes = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
-    ferry_net::framing::write_frame(&mut stream, &bytes).map_err(|e| e.to_string())?;
+    ferry_net::framing::write_frame_with_max(&mut stream, &bytes, ferry_net::framing::IPC_MAX_FRAME_BYTES)
+        .map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
 
-    let response_bytes = ferry_net::framing::read_frame(&mut stream).map_err(|e| e.to_string())?;
+    let response_bytes = ferry_net::framing::read_frame_with_max(&mut stream, ferry_net::framing::IPC_MAX_FRAME_BYTES)
+        .map_err(|e| e.to_string())?;
     let response: IpcResponse = serde_json::from_slice(&response_bytes).map_err(|e| e.to_string())?;
 
     match response.outcome {
@@ -706,11 +726,13 @@ fn cmd_watch() -> Result<(), String> {
         request: IpcRequest::Subscribe,
     };
     let bytes = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
-    ferry_net::framing::write_frame(&mut stream, &bytes).map_err(|e| e.to_string())?;
+    ferry_net::framing::write_frame_with_max(&mut stream, &bytes, ferry_net::framing::IPC_MAX_FRAME_BYTES)
+        .map_err(|e| e.to_string())?;
     stream.flush().map_err(|e| e.to_string())?;
     eprintln!("watching daemon events — Ctrl-C to stop");
     loop {
-        let frame = ferry_net::framing::read_frame(&mut stream).map_err(|e| e.to_string())?;
+        let frame = ferry_net::framing::read_frame_with_max(&mut stream, ferry_net::framing::IPC_MAX_FRAME_BYTES)
+            .map_err(|e| e.to_string())?;
         let event: serde_json::Value = serde_json::from_slice(&frame).map_err(|e| e.to_string())?;
         if json_output() {
             println!("{event}");
@@ -770,16 +792,83 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            if let Some(rest) = message.strip_prefix("unreachable: ") {
-                eprintln!("ferry: {rest}");
-                ExitCode::from(EXIT_UNREACHABLE)
-            } else if let Some(rest) = message.strip_prefix("protocol: ") {
-                eprintln!("ferry: {rest}");
-                ExitCode::from(EXIT_PROTOCOL)
-            } else {
-                eprintln!("ferry: {message}");
-                ExitCode::FAILURE
-            }
+            eprintln!("ferry: {}", user_facing_error(&message));
+            ExitCode::from(exit_code_for_error(&message))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_connection_failure_maps_to_the_unreachable_exit_code() {
+        let msg = "unreachable: could not connect to the ferry daemon at /x — is it running? (nope)";
+        assert_eq!(exit_code_for_error(msg), EXIT_UNREACHABLE);
+        assert_eq!(user_facing_error(msg), "could not connect to the ferry daemon at /x — is it running? (nope)");
+    }
+
+    #[test]
+    fn a_protocol_error_maps_to_the_protocol_exit_code() {
+        let msg = "protocol: RosterInvalid: signature did not verify";
+        assert_eq!(exit_code_for_error(msg), EXIT_PROTOCOL);
+        assert_eq!(user_facing_error(msg), "RosterInvalid: signature did not verify");
+    }
+
+    #[test]
+    fn any_other_error_maps_to_a_plain_failure_and_is_shown_verbatim() {
+        let msg = "the roster file does not exist";
+        assert_eq!(exit_code_for_error(msg), EXIT_FAILURE);
+        assert_eq!(user_facing_error(msg), msg);
+    }
+
+    #[test]
+    fn the_four_exit_codes_are_distinct() {
+        let codes = [0u8, EXIT_FAILURE, EXIT_UNREACHABLE, EXIT_PROTOCOL];
+        let unique: std::collections::BTreeSet<u8> = codes.iter().copied().collect();
+        assert_eq!(unique.len(), codes.len(), "exit codes 0/1/3/4 must stay distinct");
+    }
+
+    fn parse(args: &[&str]) -> Cli {
+        match Cli::try_parse_from(args) {
+            Ok(cli) => cli,
+            Err(e) => panic!("expected {args:?} to parse: {e}"),
+        }
+    }
+
+    #[test]
+    fn bad_usage_is_rejected_by_the_parser_with_the_usage_exit_class() {
+        match Cli::try_parse_from(["ferry", "no-such-command"]) {
+            Ok(_) => panic!("an unknown subcommand must not parse"),
+            Err(e) => assert_eq!(e.exit_code(), 2, "clap reserves exit code 2 for usage errors"),
+        }
+    }
+
+    #[test]
+    fn global_json_and_socket_flags_parse_after_the_subcommand() {
+        let cli = parse(&["ferry", "status", "--json", "--socket", "/tmp/f.sock"]);
+        assert!(cli.json);
+        assert_eq!(cli.socket.as_deref(), Some(Path::new("/tmp/f.sock")));
+        assert!(matches!(cli.command, Command::Status));
+    }
+
+    #[test]
+    fn send_parses_its_flags_and_defaults_the_ttl() {
+        let cli = parse(&["ferry", "send", "peer-1", "/tmp/secrets.env", "--burn"]);
+        assert!(matches!(
+            cli.command,
+            Command::Send { ref peer_id, ref path, ttl, burn: true, notify_on_open: false }
+                if peer_id == "peer-1" && path == Path::new("/tmp/secrets.env") && ttl == DEFAULT_TTL_SECS
+        ));
+    }
+
+    #[test]
+    fn nested_subcommands_round_trip_through_the_parser() {
+        let cli = parse(&["ferry", "inbox", "reject", "item-7", "--yes"]);
+        assert!(matches!(
+            cli.command,
+            Command::Inbox { command: InboxCommand::Reject { item_id, yes: true } } if item_id == "item-7"
+        ));
     }
 }

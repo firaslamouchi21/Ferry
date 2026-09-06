@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { WebSocketServer } from "ws";
 
-const MAX_FRAME_BYTES = 65535;
+const MAX_FRAME_BYTES = 64 * 1024 * 1024;
 
 export function defaultSocketPath() {
   if (process.env.FERRY_SOCK) return process.env.FERRY_SOCK;

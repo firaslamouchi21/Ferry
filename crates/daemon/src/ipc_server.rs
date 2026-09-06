@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use ferry_net::framing::{self, FramingError, IPC_MAX_FRAME_BYTES};
 use ferry_net::local_ipc::{self, Listener, Stream};
 
 use ferry_core::expiry::ExpiryClock;
@@ -20,6 +21,14 @@ pub enum IpcServerError {
     Bind { path: PathBuf, source: std::io::Error },
     #[error("failed to accept a connection: {0}")]
     Accept(std::io::Error),
+}
+
+fn ipc_write_frame(stream: &mut Stream, bytes: &[u8]) -> Result<(), FramingError> {
+    framing::write_frame_with_max(stream, bytes, IPC_MAX_FRAME_BYTES)
+}
+
+fn ipc_read_frame(stream: &mut Stream) -> Result<Vec<u8>, FramingError> {
+    framing::read_frame_with_max(stream, IPC_MAX_FRAME_BYTES)
 }
 
 pub fn bind(socket_path: &Path) -> Result<Listener, IpcServerError> {
@@ -52,7 +61,7 @@ fn spawn_event_stream(mut stream: Stream, event_bus: &EventBus) {
     std::thread::spawn(move || {
         for event in events {
             let Ok(bytes) = serde_json::to_vec(&event) else { continue };
-            if ferry_net::framing::write_frame(&mut stream, &bytes).is_err() {
+            if ipc_write_frame(&mut stream, &bytes).is_err() {
                 break;
             }
         }
@@ -69,7 +78,7 @@ fn handle_connection(
     event_bus: &EventBus,
     pairing: &PairingRegistry,
 ) -> bool {
-    let frame = match ferry_net::framing::read_frame(&mut stream) {
+    let frame = match ipc_read_frame(&mut stream) {
         Ok(frame) => frame,
         Err(err) => {
             eprintln!("ferry-daemon: dropping IPC connection — failed to read frame: {err}");
@@ -120,7 +129,7 @@ fn handle_connection(
 fn write_response(stream: &mut Stream, response: &IpcResponse) {
     match serde_json::to_vec(response) {
         Ok(bytes) => {
-            if let Err(err) = ferry_net::framing::write_frame(stream, &bytes) {
+            if let Err(err) = ipc_write_frame(stream, &bytes) {
                 eprintln!("ferry-daemon: failed to write IPC response: {err}");
             }
         }
@@ -360,7 +369,7 @@ mod tests {
         ferry_net::framing::write_frame(&mut stream, &bytes).unwrap();
         stream.flush().unwrap();
 
-        let response_bytes = ferry_net::framing::read_frame(&mut stream).unwrap();
+        let response_bytes = ipc_read_frame(&mut stream).unwrap();
         serde_json::from_slice(&response_bytes).unwrap()
     }
 

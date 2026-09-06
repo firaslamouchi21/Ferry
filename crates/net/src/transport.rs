@@ -263,7 +263,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(TransportError::Framing(FramingError::OversizeFrame(_)))
+            Err(TransportError::Framing(FramingError::OversizeFrame(..)))
         ));
     }
 }

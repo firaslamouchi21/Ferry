@@ -1,6 +1,6 @@
 import net from "node:net";
 
-const MAX_FRAME_BYTES = 65535;
+const MAX_FRAME_BYTES = 64 * 1024 * 1024;
 
 export function writeFrame(socket: net.Socket, payload: Buffer): void {
   const header = Buffer.alloc(4);
