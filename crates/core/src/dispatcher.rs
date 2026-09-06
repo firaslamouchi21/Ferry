@@ -120,6 +120,12 @@ pub fn drain_outbox_for_peer_reporting(
                 store.discard_staged_source(&entry.item_id)?;
                 outcome.delivered.push(entry.item_id);
             }
+            Err(TransferError::DeclinedByReceiver(_)) => {
+                store.remove_outbox_entry(&entry.outbox_id)?;
+                store.record_outbound_dropped(&entry.item_id, actor)?;
+                store.discard_staged_source(&entry.item_id)?;
+                outcome.dropped.push(entry.item_id);
+            }
             Err(err) => {
                 outcome.failed.push((entry.item_id, err));
             }

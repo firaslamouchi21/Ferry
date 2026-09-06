@@ -41,7 +41,7 @@ mod tests {
     use ferry_proto::envelope::WireMessage;
     use ferry_proto::states::{ItemKind, TransferState};
     use std::io::Cursor;
-    use std::os::unix::net::UnixStream;
+    use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
     use std::thread;
 
@@ -49,9 +49,17 @@ mod tests {
         std::env::temp_dir().join(format!("ferry-channel-adapter-test-{}", uuid::Uuid::now_v7()))
     }
 
+    fn stream_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let a = TcpStream::connect(addr).unwrap();
+        let (b, _) = listener.accept().unwrap();
+        (a, b)
+    }
+
     #[test]
     fn core_transfer_send_offer_works_over_a_real_noise_xk_channel() {
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
         let initiator_keys = ferry_net::transport::generate_keypair();
         let responder_keys = ferry_net::transport::generate_keypair();
         let responder_public = responder_keys.public;
@@ -107,7 +115,7 @@ mod tests {
         use ferry_core::transfer::{open_item, receive_item, send_item};
         use sha2::{Digest, Sha256};
 
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
         let initiator_keys = ferry_net::transport::generate_keypair();
         let responder_keys = ferry_net::transport::generate_keypair();
         let responder_public = responder_keys.public;
@@ -228,7 +236,7 @@ mod tests {
         let item_id = ferry_core::outbox::enqueue_send(&mut sender_store, &sender_clock, &item, "local").unwrap();
 
         {
-            let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+            let (initiator_sock, responder_sock) = stream_pair();
             let sender_payload = payload.clone();
             let item_first = item.clone();
             let item_id_first = item_id.clone();
@@ -287,7 +295,7 @@ mod tests {
             "the first session must have landed a real partial prefix on disk"
         );
 
-        let (initiator_sock, responder_sock) = UnixStream::pair().unwrap();
+        let (initiator_sock, responder_sock) = stream_pair();
         let item_resumed = item.clone();
         let item_id_resumed = item_id.clone();
         let sender_payload = payload.clone();

@@ -33,6 +33,19 @@ pub enum IpcRequest {
         signing_key_hex: String,
         sealing_key: String,
     },
+    PairBegin {
+        mode: PairMode,
+    },
+    PairStatus {
+        pairing_id: String,
+    },
+    PairConfirm {
+        pairing_id: String,
+        accept: bool,
+    },
+    PairCancel {
+        pairing_id: String,
+    },
     SendInline {
         peer_id: String,
         name: String,
@@ -56,6 +69,48 @@ pub enum IpcRequest {
     AuditList { limit: u32, before_millis: Option<i64> },
     PeerRemove { peer_id: String },
     Subscribe,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "role", content = "params", rename_all = "snake_case")]
+#[ts(export, export_to = "../../../bindings/", rename_all = "snake_case")]
+pub enum PairMode {
+    Listen {
+        display_name: String,
+    },
+    Connect {
+        addr: String,
+        code: String,
+        display_name: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "../../../bindings/", rename_all = "snake_case")]
+pub enum PairPhase {
+    AwaitingPeer,
+    AwaitingConfirmation,
+    Done,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct PairBeginView {
+    pub pairing_id: String,
+    pub listen_addr: Option<String>,
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct PairStatusView {
+    pub phase: PairPhase,
+    pub phrase: Option<String>,
+    pub peer_fingerprint: Option<String>,
+    pub peer_display_name: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -96,6 +151,7 @@ pub struct IpcEnvelope {
 #[ts(export, export_to = "../../../bindings/")]
 pub struct DaemonStatus {
     pub protocol_version: u16,
+    pub ipc_protocol_version: u16,
     pub discovery_ok: bool,
     pub transport_ok: bool,
     pub store_ok: bool,
@@ -204,6 +260,8 @@ pub enum IpcResult {
     Identity(IdentityView),
     SentList(Vec<SentItemView>),
     AuditList(Vec<AuditEventView>),
+    PairBegin(PairBeginView),
+    PairStatus(PairStatusView),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

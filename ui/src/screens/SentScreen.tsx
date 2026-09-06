@@ -63,6 +63,7 @@ export function SentScreen() {
                   {t("sent.dropped")} <strong>{dropped}</strong>
                 </span>
               </div>
+              {queued > 0 ? <p className="muted">{t("sent.queuedHint")}</p> : null}
               <Tabs
                 active={filter}
                 onChange={setFilter}
@@ -84,7 +85,6 @@ export function SentScreen() {
                 <DataTable
                   rows={rows}
                   rowKey={(i) => i.item_id}
-                  onRowClick={(i) => navigate(`/inbox/${i.item_id}`)}
                   columns={[
                     {
                       key: "name",

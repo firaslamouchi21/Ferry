@@ -202,6 +202,10 @@ export class MockTransport implements Transport {
   private inbox = seedInbox();
   private sent = seedSent();
   private audit = seedAudit();
+  private pairings = new Map<
+    string,
+    { phase: "awaiting_peer" | "awaiting_confirmation" | "done" | "failed"; ticks: number; accepted?: boolean }
+  >();
 
   phase(): ConnectionPhase {
     return "connected";
@@ -243,7 +247,7 @@ export class MockTransport implements Transport {
       case "status":
         return ok({
           result: "status",
-          value: { protocol_version: 1, discovery_ok: true, transport_ok: true, store_ok: true },
+          value: { protocol_version: 1, ipc_protocol_version: 1, discovery_ok: true, transport_ok: true, store_ok: true },
         })(id);
       case "identity":
         return ok({ result: "identity", value: identity })(id);
@@ -305,6 +309,53 @@ export class MockTransport implements Transport {
       case "audit_list":
         return ok({ result: "audit_list", value: this.audit })(id);
       case "pair_complete":
+        return ok({ result: "ack" })(id);
+      case "pair_begin": {
+        const pairingId = `PR_${Math.random().toString(36).slice(2, 8)}`;
+        this.pairings.set(pairingId, { phase: "awaiting_peer", ticks: 0 });
+        const listen = request.params.mode.role === "listen";
+        return ok({
+          result: "pair_begin",
+          value: {
+            pairing_id: pairingId,
+            listen_addr: listen ? "127.0.0.1:53124" : null,
+            code: listen ? "482913" : null,
+          },
+        })(id);
+      }
+      case "pair_status": {
+        const p = this.pairings.get(request.params.pairing_id);
+        if (!p) {
+          return {
+            request_id: id,
+            outcome: { outcome: "err", error: { code: "internal", message: "no such pairing session" } },
+          };
+        }
+        p.ticks += 1;
+        if (p.phase === "awaiting_peer" && p.ticks >= 2) p.phase = "awaiting_confirmation";
+        if (p.phase === "awaiting_confirmation" && p.accepted === true) {
+          p.phase = "done";
+          this.emit({ event: "changed", params: { resource: "roster", id: null } });
+        }
+        if (p.phase === "awaiting_confirmation" && p.accepted === false) p.phase = "failed";
+        return ok({
+          result: "pair_status",
+          value: {
+            phase: p.phase,
+            phrase: p.phase === "awaiting_confirmation" || p.phase === "done" ? "scotland-revolver-tempest-miracle" : null,
+            peer_fingerprint: p.phase === "done" ? "a1b2c3d4e5f6a7b8" : null,
+            peer_display_name: p.phase === "done" ? "the-other-laptop" : null,
+            error: p.phase === "failed" ? "the other device did not confirm" : null,
+          },
+        })(id);
+      }
+      case "pair_confirm": {
+        const p = this.pairings.get(request.params.pairing_id);
+        if (p) p.accepted = request.params.accept;
+        return ok({ result: "ack" })(id);
+      }
+      case "pair_cancel":
+        this.pairings.delete(request.params.pairing_id);
         return ok({ result: "ack" })(id);
       case "export_sealed":
         return ok({ result: "export_sealed", value: { blob_base64: btoa("FERRYSEALEDBLOB\x01...") } })(id);

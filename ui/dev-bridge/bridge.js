@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { WebSocketServer } from "ws";
 
-const MAX_FRAME_BYTES = 65535;
+const MAX_FRAME_BYTES = 64 * 1024 * 1024;
 
 export function defaultSocketPath() {
   if (process.env.FERRY_SOCK) return process.env.FERRY_SOCK;
@@ -12,7 +12,7 @@ export function defaultSocketPath() {
     return path.join(home, "Library", "Application Support", "dev.ferry.ferry", "ferry.sock");
   }
   if (process.platform === "win32") {
-    return path.join(process.env.APPDATA ?? home, "ferry", "ferry", "data", "ferry.sock");
+    return "\\\\.\\pipe\\ferry.sock";
   }
   const base = process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
   return path.join(base, "ferry", "ferry.sock");
@@ -106,8 +106,19 @@ function handleConnection(ws, socketPath) {
 
 export function attachBridge(httpServer, opts = {}) {
   const socketPath = opts.socketPath ?? defaultSocketPath();
-  const wss = new WebSocketServer({ server: httpServer, path: "/ferry-ipc" });
+  const wss = new WebSocketServer({ noServer: true });
   wss.on("connection", (ws) => handleConnection(ws, socketPath));
+  wss.on("error", () => {});
+  httpServer.on("upgrade", (req, socket, head) => {
+    let pathname;
+    try {
+      pathname = new URL(req.url ?? "/", "http://localhost").pathname;
+    } catch {
+      return;
+    }
+    if (pathname !== "/ferry-ipc") return;
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit("connection", ws, req));
+  });
   return wss;
 }
 

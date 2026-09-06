@@ -148,6 +148,12 @@ pub fn handle(
         IpcRequest::Subscribe => internal_error(
             "Subscribe is handled by the IPC server's event stream, not the request dispatcher".into(),
         ),
+        IpcRequest::PairBegin { .. }
+        | IpcRequest::PairStatus { .. }
+        | IpcRequest::PairConfirm { .. }
+        | IpcRequest::PairCancel { .. } => internal_error(
+            "pairing requests are handled by the daemon's pairing registry, not the request dispatcher".into(),
+        ),
     };
 
     IpcResponse { request_id, outcome }
@@ -158,6 +164,7 @@ fn status_outcome(store: &impl Store, runtime: &RuntimeStatus) -> IpcOutcome {
     IpcOutcome::Ok {
         value: IpcResult::Status(DaemonStatus {
             protocol_version: PROTOCOL_VERSION,
+            ipc_protocol_version: IPC_PROTOCOL_VERSION,
             discovery_ok: runtime.discovery_ok,
             transport_ok: runtime.transport_ok,
             store_ok,

@@ -3,6 +3,7 @@ import { Power, RotateCw } from "lucide-react";
 import { useDaemonStatus, useFerry, useIdentity } from "@/lib/query";
 import { Button, ConfirmDialog, CopyButton, Fingerprint } from "@/components";
 import { LOCALES, LOCALE_LABELS, useI18n } from "@/lib/i18n";
+import { THEME_PREFS, useTheme } from "@/lib/theme";
 import { Async, ScreenHeader } from "./parts";
 
 export function SettingsScreen() {
@@ -10,6 +11,7 @@ export function SettingsScreen() {
   const status = useDaemonStatus();
   const { client } = useFerry();
   const { locale, setLocale, t } = useI18n();
+  const { pref: themePref, setPref: setThemePref } = useTheme();
   const [confirmQuit, setConfirmQuit] = useState(false);
 
   const canManageLifecycle = client.host !== "browser";
@@ -56,6 +58,23 @@ export function SettingsScreen() {
                     ))}
                   </select>
                   <span className="muted"> {t("settings.languageHint")}</span>
+                </span>
+              </div>
+              <div className="settings-row">
+                <span className="detail-label">{t("settings.theme")}</span>
+                <span className="settings-value">
+                  <select
+                    className="text-input"
+                    value={themePref}
+                    onChange={(e) => setThemePref(e.target.value as (typeof THEME_PREFS)[number])}
+                  >
+                    {THEME_PREFS.map((p) => (
+                      <option key={p} value={p}>
+                        {t(p === "light" ? "settings.themeLight" : p === "dark" ? "settings.themeDark" : "settings.themeSystem")}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="muted"> {t("settings.themeHint")}</span>
                 </span>
               </div>
             </section>
@@ -119,6 +138,7 @@ export function SettingsScreen() {
         <ConfirmDialog
           title={t("settings.quitTitle")}
           danger
+          typeToConfirm="quit"
           confirmLabel={t("settings.quitConfirm")}
           body={<p>{t("settings.quitBody")}</p>}
           onCancel={() => setConfirmQuit(false)}

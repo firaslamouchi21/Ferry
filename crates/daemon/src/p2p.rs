@@ -33,20 +33,23 @@ pub fn serve_incoming(
     store: &mut impl Store,
     clock: &ExpiryClock,
     peer_id_for: impl Fn(&[u8; 32]) -> Option<String>,
+    auto_accept: bool,
     emit: &EventSink,
 ) -> Result<(), P2pError> {
     loop {
         let (stream, _addr) = listener.accept().map_err(P2pError::Accept)?;
-        handle_incoming_connection(stream, local_keys, store, clock, &peer_id_for, CONNECTION_IDLE_TIMEOUT, emit);
+        handle_incoming_connection(stream, local_keys, store, clock, &peer_id_for, auto_accept, CONNECTION_IDLE_TIMEOUT, emit);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_incoming_connection(
     stream: TcpStream,
     local_keys: &StaticKeypair,
     store: &mut impl Store,
     clock: &ExpiryClock,
     peer_id_for: &impl Fn(&[u8; 32]) -> Option<String>,
+    auto_accept: bool,
     idle_timeout: Duration,
     emit: &EventSink,
 ) {
@@ -84,7 +87,7 @@ fn handle_incoming_connection(
                 emit(IpcEvent::Progress { item_id: item_id.to_string(), bytes, total });
             }
         };
-        match receive_next_inbound(&mut channel, store, clock, &peer_id, &peer_id, &mut on_progress) {
+        match receive_next_inbound(&mut channel, store, clock, &peer_id, &peer_id, auto_accept, &mut on_progress) {
             Ok(InboundEvent::ItemDelivered(offer)) => {
                 println!("ferry-daemon: received item {} from {peer_id}", offer.item_id.0);
                 let resource = if offer.kind == ItemKind::Message {
@@ -93,6 +96,21 @@ fn handle_incoming_connection(
                     IpcResource::Transfer
                 };
                 emit(IpcEvent::Changed { resource, id: Some(offer.item_id.0) });
+            }
+            Ok(InboundEvent::OfferPending(offer)) => {
+                println!("ferry-daemon: offer {} from {peer_id} is held for a local accept/reject", offer.item_id.0);
+                let resource = if offer.kind == ItemKind::Message {
+                    IpcResource::Message
+                } else {
+                    IpcResource::Transfer
+                };
+                emit(IpcEvent::Changed { resource, id: Some(offer.item_id.0) });
+                break;
+            }
+            Ok(InboundEvent::OfferDeclined(item_id)) => {
+                println!("ferry-daemon: offer {item_id} from {peer_id} was declined locally");
+                emit(IpcEvent::Changed { resource: IpcResource::Transfer, id: Some(item_id) });
+                break;
             }
             Ok(InboundEvent::OpenReceipt(item_id)) => {
                 println!("ferry-daemon: {peer_id} reported opening item {item_id}");
@@ -150,6 +168,7 @@ mod tests {
                 &mut store,
                 &clock,
                 &move |remote: &[u8; 32]| (*remote == initiator_public).then(|| "peer-a".to_string()),
+                true,
                 CONNECTION_IDLE_TIMEOUT,
                 &|event| events.borrow_mut().push(event),
             );
@@ -219,7 +238,7 @@ mod tests {
             );
             let clock = ExpiryClock::new();
             let (stream, _addr) = listener.accept().unwrap();
-            handle_incoming_connection(stream, &responder_keys, &mut store, &clock, &|_: &[u8; 32]| None, CONNECTION_IDLE_TIMEOUT, &crate::event_bus::noop_sink);
+            handle_incoming_connection(stream, &responder_keys, &mut store, &clock, &|_: &[u8; 32]| None, true, CONNECTION_IDLE_TIMEOUT, &crate::event_bus::noop_sink);
         });
 
         let stream = TcpStream::connect(addr).unwrap();
@@ -251,6 +270,7 @@ mod tests {
             &mut store,
             &clock,
             &|_: &[u8; 32]| None,
+            true,
             std::time::Duration::from_millis(200),
             &crate::event_bus::noop_sink,
         );

@@ -48,18 +48,12 @@ pub enum ConfigError {
     PortTooLow(u16),
     #[error("data_dir must not be an empty path")]
     EmptyDataDir,
-    #[error("auto_accept_from_roster = false is not supported yet: the transfer engine still accepts an offer on the wire as soon as it arrives, so there is no point at which a human decision could be applied. Leave it true until deferred accept/reject is built")]
-    ManualAcceptUnsupported,
 }
 
 impl RawConfig {
     pub fn validate(self, default_data_dir: PathBuf) -> Result<Config, ConfigError> {
         if self.listen_port < MIN_PORT {
             return Err(ConfigError::PortTooLow(self.listen_port));
-        }
-
-        if !self.auto_accept_from_roster {
-            return Err(ConfigError::ManualAcceptUnsupported);
         }
 
         let data_dir = self.data_dir.unwrap_or(default_data_dir);
@@ -115,16 +109,14 @@ mod tests {
     }
 
     #[test]
-    fn disabling_auto_accept_is_refused_at_boot_rather_than_silently_ignored() {
+    fn disabling_auto_accept_is_accepted_now_that_deferred_accept_exists() {
         let raw = RawConfig {
             listen_port: 47821,
             data_dir: None,
             auto_accept_from_roster: false,
         };
-        assert_eq!(
-            raw.validate(PathBuf::from("/tmp/ferry")),
-            Err(ConfigError::ManualAcceptUnsupported)
-        );
+        let config = raw.validate(PathBuf::from("/tmp/ferry")).unwrap();
+        assert!(!config.auto_accept_from_roster);
     }
 
     #[test]

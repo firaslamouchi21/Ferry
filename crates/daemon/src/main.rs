@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -42,6 +42,14 @@ enum BootError {
     Ipc(#[from] ferry_daemon::ipc_server::IpcServerError),
 }
 
+fn read_hostname() -> Option<String> {
+    #[cfg(windows)]
+    let raw = std::env::var("COMPUTERNAME").ok();
+    #[cfg(not(windows))]
+    let raw = std::fs::read_to_string("/etc/hostname").ok();
+    raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
 fn load_raw_config(data_dir: &Path) -> Result<RawConfig, BootError> {
     let config_path = data_dir.join("config.toml");
     match fs::read_to_string(&config_path) {
@@ -67,6 +75,7 @@ fn acquire_single_instance_lock(config: &Config) -> Result<File, BootError> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
+        .read(true)
         .write(true)
         .open(&lock_path)
         .map_err(|source| BootError::OpenLock {
@@ -82,6 +91,7 @@ fn acquire_single_instance_lock(config: &Config) -> Result<File, BootError> {
 
 fn write_lock_metadata(mut lock_file: &File, config: &Config) -> std::io::Result<()> {
     lock_file.set_len(0)?;
+    lock_file.seek(SeekFrom::Start(0))?;
     writeln!(lock_file, "pid={}", std::process::id())?;
     writeln!(lock_file, "port={}", config.listen_port)
 }
@@ -132,7 +142,7 @@ fn boot() -> Result<(), BootError> {
     let socket_for_signal = socket_path.clone();
     if let Err(err) = ctrlc::set_handler(move || {
         eprintln!("ferry-daemon: received interrupt — shutting down");
-        let _ = fs::remove_file(&socket_for_signal);
+        ferry_net::local_ipc::cleanup(&socket_for_signal);
         std::process::exit(0);
     }) {
         eprintln!("ferry-daemon: could not install a signal handler: {err}");
@@ -143,6 +153,7 @@ fn boot() -> Result<(), BootError> {
 
     let local_keys = ipc_store.static_keypair();
     let fingerprint = ipc_store.identity().fingerprint();
+    let auto_accept = config.auto_accept_from_roster;
 
     let transport_ok = match ferry_daemon::p2p::bind(config.listen_port) {
         Ok(p2p_listener) => {
@@ -157,6 +168,7 @@ fn boot() -> Result<(), BootError> {
                     &mut p2p_store,
                     &clock,
                     peer_id_for,
+                    auto_accept,
                     &emit,
                 ) {
                     eprintln!("ferry-daemon: P2P listener stopped: {err}");
@@ -206,11 +218,7 @@ fn boot() -> Result<(), BootError> {
         }
     };
 
-    let display_name = std::fs::read_to_string("/etc/hostname")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "this device".to_string());
+    let display_name = read_hostname().unwrap_or_else(|| "this device".to_string());
     let runtime = ferry_core::ipc::RuntimeStatus {
         transport_ok,
         discovery_ok,
@@ -235,7 +243,8 @@ fn boot() -> Result<(), BootError> {
     println!("transport_ok={transport_ok} discovery_ok={discovery_ok}");
 
     let mut ipc_source = ferry_daemon::file_source::FilePathSource::new(ipc_store.identity().clone());
-    ferry_daemon::ipc_server::serve(&listener, &mut ipc_store, &clock, &runtime, &event_bus, &mut ipc_source)?;
+    let pairing = ferry_daemon::pairing::PairingRegistry::new(ipc_store.identity().clone());
+    ferry_daemon::ipc_server::serve(&listener, &mut ipc_store, &clock, &runtime, &event_bus, &pairing, &mut ipc_source)?;
     let _ = std::fs::remove_file(&socket_path);
 
     Ok(())
@@ -248,5 +257,113 @@ fn main() -> ExitCode {
             eprintln!("ferry-daemon: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!("ferry-daemon-boot-test-{}", uuid::Uuid::now_v7()));
+            fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn config_in(dir: &Path) -> Config {
+        RawConfig {
+            data_dir: Some(dir.to_path_buf()),
+            ..RawConfig::default()
+        }
+        .validate(PathBuf::from(".ferry"))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_missing_config_file_falls_back_to_defaults_rather_than_failing() {
+        let dir = TempDir::new();
+        let raw = load_raw_config(&dir.0).unwrap();
+        assert_eq!(raw.listen_port, RawConfig::default().listen_port);
+        assert!(raw.data_dir.is_none());
+        assert!(raw.auto_accept_from_roster);
+    }
+
+    #[test]
+    fn a_present_config_file_is_read_and_parsed() {
+        let dir = TempDir::new();
+        fs::write(
+            dir.0.join("config.toml"),
+            "listen_port = 51000\nauto_accept_from_roster = false\n",
+        )
+        .unwrap();
+        let raw = load_raw_config(&dir.0).unwrap();
+        assert_eq!(raw.listen_port, 51000);
+        assert!(!raw.auto_accept_from_roster);
+    }
+
+    #[test]
+    fn a_malformed_config_file_fails_fast_and_names_the_path() {
+        let dir = TempDir::new();
+        fs::write(dir.0.join("config.toml"), "listen_port = \"not a number\"\n").unwrap();
+        let err = load_raw_config(&dir.0).unwrap_err();
+        assert!(matches!(err, BootError::ParseConfig { .. }), "got {err:?}");
+        assert!(err.to_string().contains("config.toml"));
+    }
+
+    #[test]
+    fn the_first_lock_holder_wins_and_a_second_acquisition_is_refused_while_it_is_held() {
+        let dir = TempDir::new();
+        let config = config_in(&dir.0);
+
+        let first = acquire_single_instance_lock(&config).unwrap();
+
+        let second = acquire_single_instance_lock(&config);
+        assert!(
+            matches!(second, Err(BootError::AlreadyRunning(_))),
+            "a second daemon on the same data dir must be refused, not double-started"
+        );
+
+        drop(first);
+        acquire_single_instance_lock(&config).expect("the lock is reusable once the holder exits");
+    }
+
+    #[test]
+    fn acquiring_the_lock_creates_the_data_directory_when_absent() {
+        let parent = TempDir::new();
+        let data_dir = parent.0.join("nested").join("data");
+        let config = config_in(&data_dir);
+        assert!(!data_dir.exists());
+
+        let _lock = acquire_single_instance_lock(&config).unwrap();
+        assert!(data_dir.join("ferry.lock").is_file());
+    }
+
+    #[test]
+    fn lock_metadata_records_pid_and_port_and_overwrites_stale_contents() {
+        let dir = TempDir::new();
+        let config = config_in(&dir.0);
+        let mut lock = acquire_single_instance_lock(&config).unwrap();
+
+        write_lock_metadata(&lock, &config).unwrap();
+        write_lock_metadata(&lock, &config).unwrap();
+
+        let mut contents = String::new();
+        lock.seek(SeekFrom::Start(0)).unwrap();
+        lock.read_to_string(&mut contents).unwrap();
+
+        assert_eq!(contents.matches("pid=").count(), 1, "stale metadata must be truncated, not appended to");
+        assert!(contents.contains(&format!("pid={}", std::process::id())));
+        assert!(contents.contains(&format!("port={}", config.listen_port)));
     }
 }

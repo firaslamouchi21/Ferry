@@ -6,6 +6,7 @@ pub mod expiry;
 mod harness;
 pub mod ipc;
 pub mod outbox;
+pub mod pairing;
 pub mod secrets;
 pub mod policy;
 pub mod ports;

@@ -15,8 +15,8 @@ use crate::policy::PolicyError;
 use crate::ports::{Channel, ChannelError, NewOutboundItem, OutboxItem, Store, StoreError};
 use crate::state::TRANSFER_TRANSITIONS;
 use crate::transfer::{
-    open_item, receive_item, recv_message, send_accept, send_chunk, send_item, send_offer,
-    TransferError,
+    accept_inbound_offer, open_item, receive_item, receive_next_inbound, recv_message, reject_inbound_offer,
+    send_accept, send_chunk, send_item, send_offer, InboundEvent, TransferError,
 };
 
 struct OutboundRecord {
@@ -591,6 +591,180 @@ fn an_item_delivered_with_an_already_elapsed_ttl_cannot_be_opened() {
     let result = open_item(&mut open_channel, &mut receiver_store, &clock, &item_id);
     assert!(matches!(result, Err(TransferError::Expired(_))));
     assert_eq!(receiver_store.get_inbound_state(&item_id).unwrap(), Some(TransferState::Expired));
+}
+
+#[test]
+fn a_deferred_offer_is_held_at_offered_until_the_human_accepts_then_delivers_on_reconnect() {
+    let payload: Vec<u8> = (0..12_000u32).map(|n| (n % 256) as u8).collect();
+    let mut hasher = Sha256::new();
+    hasher.update(&payload);
+    let item = sample_item(&hex::encode(hasher.finalize()), payload.len() as u64);
+
+    let mut sender_store = InMemoryStore::with_roster(&["peer-b"]);
+    let sender_clock = ExpiryClock::new();
+    let item_id = enqueue_send(&mut sender_store, &sender_clock, &item, "local").unwrap();
+
+    let mut receiver_store = InMemoryStore::default();
+
+    {
+        let (mut sender_channel, mut receiver_channel, _partition) = network("peer-a", "peer-b");
+        let item_id_r = item_id.clone();
+        let receiver_thread = std::thread::spawn(move || {
+            let clock = ExpiryClock::new();
+            let event = receive_next_inbound(
+                &mut receiver_channel,
+                &mut receiver_store,
+                &clock,
+                "peer-a",
+                "local",
+                false,
+                &mut |_, _, _| {},
+            )
+            .unwrap();
+            assert_eq!(
+                receiver_store.get_inbound_state(&item_id_r).unwrap(),
+                Some(TransferState::Offered),
+                "a held offer must land at Offered, not Accepted"
+            );
+            (event, receiver_store)
+        });
+
+        let attempt = send_item(
+            &mut sender_channel,
+            &mut sender_store,
+            &item_id,
+            &item,
+            Cursor::new(payload.clone()),
+        );
+        assert!(
+            attempt.is_err(),
+            "with the offer held, the connection closes before an Accept — the send attempt does not complete"
+        );
+
+        let (event, store_back) = receiver_thread.join().unwrap();
+        assert!(matches!(event, InboundEvent::OfferPending(_)));
+        receiver_store = store_back;
+    }
+
+    assert_eq!(
+        sender_store.get_outbound_state(&item_id).unwrap(),
+        Some(TransferState::Offered),
+        "the sender keeps the item Offered and retryable, not Failed"
+    );
+
+    accept_inbound_offer(&mut receiver_store, &item_id).unwrap();
+
+    let (mut sender_channel, mut receiver_channel, _partition) = network("peer-a", "peer-b");
+    let receiver_thread = std::thread::spawn(move || {
+        let clock = ExpiryClock::new();
+        let event = receive_next_inbound(
+            &mut receiver_channel,
+            &mut receiver_store,
+            &clock,
+            "peer-a",
+            "local",
+            false,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        (event, receiver_store)
+    });
+
+    send_item(
+        &mut sender_channel,
+        &mut sender_store,
+        &item_id,
+        &item,
+        Cursor::new(payload.clone()),
+    )
+    .unwrap();
+
+    let (event, receiver_store) = receiver_thread.join().unwrap();
+    assert!(matches!(event, InboundEvent::ItemDelivered(_)));
+    assert_eq!(
+        receiver_store.get_inbound_state(&item_id).unwrap(),
+        Some(TransferState::Delivered)
+    );
+    assert_eq!(receiver_store.read_inbound_plaintext(&item_id).unwrap(), payload);
+    assert_eq!(
+        sender_store.get_outbound_state(&item_id).unwrap(),
+        Some(TransferState::Delivered)
+    );
+}
+
+#[test]
+fn a_rejected_offer_sends_a_reject_on_reconnect_and_the_sender_marks_it_failed() {
+    let mut hasher = Sha256::new();
+    hasher.update(b"abc");
+    let item = sample_item(&hex::encode(hasher.finalize()), 3);
+
+    let mut sender_store = InMemoryStore::with_roster(&["peer-b"]);
+    let sender_clock = ExpiryClock::new();
+    let item_id = enqueue_send(&mut sender_store, &sender_clock, &item, "local").unwrap();
+
+    let mut receiver_store = InMemoryStore::default();
+
+    {
+        let (mut sender_channel, mut receiver_channel, _partition) = network("peer-a", "peer-b");
+        let receiver_thread = std::thread::spawn(move || {
+            let clock = ExpiryClock::new();
+            let event = receive_next_inbound(
+                &mut receiver_channel,
+                &mut receiver_store,
+                &clock,
+                "peer-a",
+                "local",
+                false,
+                &mut |_, _, _| {},
+            )
+            .unwrap();
+            (event, receiver_store)
+        });
+        let _ = send_item(
+            &mut sender_channel,
+            &mut sender_store,
+            &item_id,
+            &item,
+            Cursor::new(b"abc".to_vec()),
+        );
+        let (event, store_back) = receiver_thread.join().unwrap();
+        assert!(matches!(event, InboundEvent::OfferPending(_)));
+        receiver_store = store_back;
+    }
+
+    reject_inbound_offer(&mut receiver_store, &item_id).unwrap();
+
+    let (mut sender_channel, mut receiver_channel, _partition) = network("peer-a", "peer-b");
+    let receiver_thread = std::thread::spawn(move || {
+        let clock = ExpiryClock::new();
+        let event = receive_next_inbound(
+            &mut receiver_channel,
+            &mut receiver_store,
+            &clock,
+            "peer-a",
+            "local",
+            false,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        (event, receiver_store)
+    });
+
+    let attempt = send_item(
+        &mut sender_channel,
+        &mut sender_store,
+        &item_id,
+        &item,
+        Cursor::new(b"abc".to_vec()),
+    );
+    assert!(matches!(attempt, Err(TransferError::DeclinedByReceiver(_))));
+
+    let (event, _receiver_store) = receiver_thread.join().unwrap();
+    assert!(matches!(event, InboundEvent::OfferDeclined(_)));
+    assert_eq!(
+        sender_store.get_outbound_state(&item_id).unwrap(),
+        Some(TransferState::Failed)
+    );
 }
 
 #[test]

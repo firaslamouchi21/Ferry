@@ -1039,7 +1039,7 @@ mod tests {
         let (mut receiver_side, mut sender_side) = paired_channels("sender-peer", "receiver-peer");
         let sender_item_id = item_id.clone();
         let sender_thread = std::thread::spawn(move || {
-            let event = receive_next_inbound(&mut sender_side, &mut sender_store, &clock, "receiver-peer", "local", &mut |_, _, _| {}).unwrap();
+            let event = receive_next_inbound(&mut sender_side, &mut sender_store, &clock, "receiver-peer", "local", true, &mut |_, _, _| {}).unwrap();
             (event, sender_store.get_outbound_state(&sender_item_id).unwrap())
         });
 
