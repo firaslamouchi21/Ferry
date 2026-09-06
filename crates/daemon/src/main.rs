@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -75,6 +75,7 @@ fn acquire_single_instance_lock(config: &Config) -> Result<File, BootError> {
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
+        .read(true)
         .write(true)
         .open(&lock_path)
         .map_err(|source| BootError::OpenLock {
@@ -90,6 +91,7 @@ fn acquire_single_instance_lock(config: &Config) -> Result<File, BootError> {
 
 fn write_lock_metadata(mut lock_file: &File, config: &Config) -> std::io::Result<()> {
     lock_file.set_len(0)?;
+    lock_file.seek(SeekFrom::Start(0))?;
     writeln!(lock_file, "pid={}", std::process::id())?;
     writeln!(lock_file, "port={}", config.listen_port)
 }
@@ -351,16 +353,14 @@ mod tests {
     fn lock_metadata_records_pid_and_port_and_overwrites_stale_contents() {
         let dir = TempDir::new();
         let config = config_in(&dir.0);
-        let lock = acquire_single_instance_lock(&config).unwrap();
+        let mut lock = acquire_single_instance_lock(&config).unwrap();
 
         write_lock_metadata(&lock, &config).unwrap();
         write_lock_metadata(&lock, &config).unwrap();
 
         let mut contents = String::new();
-        File::open(dir.0.join("ferry.lock"))
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
+        lock.seek(SeekFrom::Start(0)).unwrap();
+        lock.read_to_string(&mut contents).unwrap();
 
         assert_eq!(contents.matches("pid=").count(), 1, "stale metadata must be truncated, not appended to");
         assert!(contents.contains(&format!("pid={}", std::process::id())));
