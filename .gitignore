@@ -58,3 +58,5 @@ vitest-report/
 __pycache__/
 .pytest_cache/
 *.vsix
+
+#test
