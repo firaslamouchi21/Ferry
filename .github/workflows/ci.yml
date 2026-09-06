@@ -17,9 +17,8 @@ env:
 
 jobs:
   checks:
-    name: Supply chain, lint, bindings, tests (Linux)
-    runs-on: [self-hosted, Linux, X64]
-
+    name: Supply chain, lint, bindings, tests (ubuntu)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -54,170 +53,112 @@ jobs:
         run: cargo test --workspace --locked
 
   frontend:
-    name: UI + extension (Linux)
-    runs-on: [self-hosted, Linux, X64]
-
+    name: UI + extension (ubuntu)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-
       - name: Install pinned Rust toolchain
         run: rustup show
-
       - uses: Swatinem/rust-cache@v2
-
       - name: Regenerate bindings for the UI typecheck
         run: cargo test --package ferry-proto --locked
-
       - run: pnpm install --frozen-lockfile
-
       - run: pnpm --filter @ferry/ui typecheck
-
       - name: Unit + screen tests (vitest + jsdom)
         run: pnpm --filter @ferry/ui test
-
       - run: pnpm --filter @ferry/ui build
-
       - name: Build + package the VS Code extension (.vsix)
         run: pnpm --filter ferry-vscode package
-
       - uses: actions/upload-artifact@v4
         with:
           name: ferry-vsix-dev
           path: ext/vscode/ferry.vsix
           if-no-files-found: error
 
-  windows:
-    name: Build & test (Windows)
-    runs-on: [self-hosted, Windows, X64]
-
+  macos:
+    name: Build & test (macos)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install pinned Rust toolchain
         run: rustup show
-
       - uses: Swatinem/rust-cache@v2
-
       - name: cargo build --workspace --locked
         run: cargo build --workspace --locked
-
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
 
-  desktop-linux:
-    name: Tauri shell compiles (Linux)
-    runs-on: [self-hosted, Linux, X64]
-
+  windows:
+    name: Build & test (windows)
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install pinned Rust toolchain
         run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --workspace --locked
+        run: cargo build --workspace --locked
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
 
+  desktop:
+    name: Tauri shell compiles (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: desktop/src-tauri
-
-      - name: Install Tauri system dependencies
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            libdbus-1-dev \
-            patchelf
-
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libdbus-1-dev patchelf
       - uses: pnpm/action-setup@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: pnpm
-
       - name: Regenerate bindings for the desktop typecheck
         run: cargo test --package ferry-proto --locked
-
       - run: pnpm install --frozen-lockfile
-
       - run: pnpm --filter @ferry/desktop build
-
-      - name: cargo check the Tauri crate
-        working-directory: desktop/src-tauri
-        run: cargo check --locked
-
-  desktop-windows:
-    name: Tauri shell compiles (Windows)
-    runs-on: [self-hosted, Windows, X64]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install pinned Rust toolchain
-        run: rustup show
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: desktop/src-tauri
-
-      - uses: pnpm/action-setup@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-
-      - name: Regenerate bindings for the desktop typecheck
-        run: cargo test --package ferry-proto --locked
-
-      - run: pnpm install --frozen-lockfile
-
-      - run: pnpm --filter @ferry/desktop build
-
-      - name: cargo check the Tauri crate
+      - name: cargo check the Tauri crate (its own workspace, so the root build never sees it)
         working-directory: desktop/src-tauri
         run: cargo check --locked
 
   docker-two-peer:
-    name: Two-peer end-to-end scenario (Docker)
-    runs-on: [self-hosted, Linux, X64]
-
+    name: Two-peer end-to-end scenario (docker)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Run the scripted pair + send + open scenario across two containers
         run: bash testing/scenario.sh
 
   host-two-peer:
-    name: Two-peer end-to-end scenario (host processes)
-    runs-on: [self-hosted, Linux, X64]
-
+    name: Two-peer end-to-end scenario (host processes, no docker)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Install pinned Rust toolchain
         run: rustup show
-
       - uses: Swatinem/rust-cache@v2
-
       - name: Install dbus + gnome-keyring
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            dbus-x11 \
-            gnome-keyring \
-            libsecret-1-0
-
+          sudo apt-get install -y dbus-x11 gnome-keyring libsecret-1-0
       - name: cargo build -p ferry-daemon -p ferry-cli --locked
         run: cargo build -p ferry-daemon -p ferry-cli --locked
-
       - name: Run two real daemons with isolated keychains through pair + send + open
         run: bash testing/local-two-peer.sh
-
