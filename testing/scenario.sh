@@ -60,7 +60,7 @@ pass "send queued for $bob_id"
 echo "==> waiting for bob to receive it (mDNS-driven delivery)"
 item=""
 for _ in $(seq 1 45); do
-  item=$(inx bob sh -c "ferry receive list 2>/dev/null | awk '/payload.bin/ {print \$1}'" | tr -d '\r' | head -1 || true)
+  item=$(inx bob sh -c "ferry receive list 2>/dev/null | awk 'tolower(\$0) ~ /payload.bin/ && tolower(\$0) ~ /delivered/ {print \$1}'" | tr -d '\r' | head -1 || true)
   [ -n "$item" ] && break
   sleep 1
 done
