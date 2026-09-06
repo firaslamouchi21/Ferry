@@ -4,7 +4,6 @@ packages:
   - "desktop"
 
 allowBuilds:
-  esbuild: set this to true or false
-
-onlyBuiltDependencies:
-  - esbuild
+  esbuild: true
+  keytar: false
+  "@vscode/vsce-sign": false

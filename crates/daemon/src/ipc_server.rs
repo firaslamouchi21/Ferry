@@ -355,7 +355,12 @@ mod tests {
     }
 
     fn temp_socket_path() -> PathBuf {
-        std::env::temp_dir().join(format!("ferry-ipc-test-{}.sock", uuid::Uuid::now_v7()))
+        let base = if cfg!(unix) {
+            PathBuf::from("/tmp")
+        } else {
+            std::env::temp_dir()
+        };
+        base.join(format!("ferry-ipc-{}.sock", uuid::Uuid::now_v7().simple()))
     }
 
     fn send_request(socket_path: &Path, request: IpcRequest, ipc_protocol_version: u16) -> IpcResponse {
