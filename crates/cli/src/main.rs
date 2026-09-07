@@ -1,8 +1,9 @@
 use std::io::{self, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{ExitCode, Stdio};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use base64::Engine;
 use clap::{Parser, Subcommand};
@@ -59,10 +60,14 @@ const DEFAULT_TTL_SECS: u32 = 86_400;
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Show the daemon's health — protocol version, store, transport, discovery")]
     Status,
+    #[command(about = "Ask the running daemon to shut down")]
     Quit,
+    #[command(about = "Queue a file to send to a rostered peer (delivered out of band)")]
     Send {
-        peer_id: String,
+        #[arg(help = "the recipient's peer id, or a roster display name that uniquely matches")]
+        peer: String,
         path: PathBuf,
         #[arg(long, default_value_t = DEFAULT_TTL_SECS, help = "seconds the item stays readable after delivery")]
         ttl: u32,
@@ -71,52 +76,82 @@ enum Command {
         #[arg(long, help = "get notified when the recipient opens the item")]
         notify_on_open: bool,
     },
+    #[command(about = "Start, stop, or run the local daemon")]
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+    #[command(about = "Inspect and share the roster of paired peers")]
     Roster {
         #[command(subcommand)]
         command: RosterCommand,
     },
+    #[command(about = "Pair with another device — out-of-band code plus a confirmed verification phrase")]
     Pair {
         #[command(subcommand)]
         command: PairCommand,
     },
+    #[command(about = "List and open items other peers have sent you")]
     Receive {
         #[command(subcommand)]
         command: ReceiveCommand,
     },
+    #[command(about = "Seal a delivered item to a blob file for offline hand-carry")]
     Export {
         item_id: String,
         path: PathBuf,
     },
+    #[command(about = "Import a sealed blob file another peer exported for you")]
     Import {
         path: PathBuf,
         #[arg(long, help = "skip the confirmation prompt")]
         yes: bool,
     },
+    #[command(about = "Print this machine's fingerprint and public keys")]
     Identity,
+    #[command(about = "List or remove entries in the roster")]
     Peer {
         #[command(subcommand)]
         command: PeerCommand,
     },
+    #[command(about = "Review, accept, reject, and open offered items")]
     Inbox {
         #[command(subcommand)]
         command: InboxCommand,
     },
+    #[command(about = "Track, abort, and retry items you have queued")]
     Sent {
         #[command(subcommand)]
         command: SentCommand,
     },
+    #[command(about = "Print the local audit log — actor, kind, item, time, outcome, never contents")]
     Activity {
         #[arg(long, default_value_t = 200)]
         limit: u32,
         #[arg(long, help = "only events strictly before this unix-millis timestamp")]
         before_millis: Option<i64>,
     },
+    #[command(about = "Stream daemon events until interrupted")]
     Watch,
 }
 
 #[derive(Subcommand)]
+enum DaemonCommand {
+    #[command(about = "Spawn the daemon in the background and wait for it to accept connections")]
+    Start,
+    #[command(about = "Ask the running daemon to shut down")]
+    Stop,
+    #[command(about = "Run the daemon in the foreground (for a service manager)")]
+    Run,
+    #[command(about = "Show the daemon's health — protocol version, store, transport, discovery")]
+    Status,
+}
+
+#[derive(Subcommand)]
 enum ReceiveCommand {
+    #[command(about = "List delivered items waiting to be opened")]
     List,
+    #[command(about = "Open an item once — burns it if the sender marked it burn-after-read")]
     Open {
         item_id: String,
         #[arg(long, help = "write the content to this path instead of printing it")]
@@ -126,12 +161,14 @@ enum ReceiveCommand {
 
 #[derive(Subcommand)]
 enum PairCommand {
+    #[command(about = "Wait for the other device to connect; prints the code to read to them")]
     Listen {
         #[arg(long, default_value = "0.0.0.0:0")]
         bind: String,
         #[arg(long, help = "the name this device shows up as on the other side")]
         name: String,
     },
+    #[command(about = "Connect to a listening device using its address and short code")]
     Connect {
         addr: String,
         code: String,
@@ -142,10 +179,13 @@ enum PairCommand {
 
 #[derive(Subcommand)]
 enum RosterCommand {
+    #[command(about = "List every paired peer with its reachability")]
     List,
+    #[command(about = "Write the signed roster to a file to share with teammates")]
     Export {
         path: PathBuf,
     },
+    #[command(about = "Merge a signed roster file after showing its signer and peers")]
     Import {
         path: PathBuf,
         #[arg(long, help = "skip the confirmation prompt")]
@@ -155,7 +195,9 @@ enum RosterCommand {
 
 #[derive(Subcommand)]
 enum PeerCommand {
+    #[command(about = "List every paired peer with its reachability")]
     List,
+    #[command(about = "Remove a peer from the roster — it can no longer send or receive")]
     Remove {
         peer_id: String,
         #[arg(long, help = "skip the confirmation prompt")]
@@ -165,32 +207,40 @@ enum PeerCommand {
 
 #[derive(Subcommand)]
 enum InboxCommand {
+    #[command(about = "List items that have arrived, including ones awaiting your decision")]
     List,
+    #[command(about = "Accept an offered item so its transfer can proceed")]
     Accept { item_id: String },
+    #[command(about = "Reject an offered item and tell the sender")]
     Reject {
         item_id: String,
         #[arg(long, help = "skip the confirmation prompt")]
         yes: bool,
     },
+    #[command(about = "Open an item once — burns it if the sender marked it burn-after-read")]
     Open {
         item_id: String,
         #[arg(long, help = "write the content to this path instead of printing it")]
         out: Option<PathBuf>,
     },
+    #[command(about = "Show one item's full detail without opening it")]
     Show { item_id: String },
 }
 
 #[derive(Subcommand)]
 enum SentCommand {
+    #[command(about = "List every item you have queued and its delivery state")]
     List {
         #[arg(long, help = "only show items in this state")]
         state: Option<String>,
     },
+    #[command(about = "Drop a queued item that has not yet been delivered")]
     Abort {
         item_id: String,
         #[arg(long, help = "skip the confirmation prompt")]
         yes: bool,
     },
+    #[command(about = "Re-queue a failed item for another delivery attempt")]
     Retry { item_id: String },
 }
 
@@ -261,7 +311,125 @@ fn cmd_quit() -> Result<(), String> {
     }
 }
 
-fn cmd_send(peer_id: &str, path: &Path, ttl_secs: u32, is_burn_after_read: bool, notify_on_open: bool) -> Result<(), String> {
+fn active_socket_path() -> PathBuf {
+    match SOCKET_OVERRIDE.get().and_then(|o| o.clone()) {
+        Some(path) => path,
+        None => ferry_core::config::ipc_socket_path(&ferry_core::config::default_data_dir()),
+    }
+}
+
+fn daemon_is_running() -> bool {
+    ferry_net::local_ipc::connect(&active_socket_path()).is_ok()
+}
+
+fn ferry_daemon_bin() -> PathBuf {
+    let name = if cfg!(windows) { "ferry-daemon.exe" } else { "ferry-daemon" };
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+        .filter(|sibling| sibling.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+fn spawn_daemon(stdout: Stdio, stderr: Stdio) -> Result<std::process::Child, String> {
+    let bin = ferry_daemon_bin();
+    let mut command = std::process::Command::new(&bin);
+    command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    command.spawn().map_err(|source| {
+        format!("could not start {} — is ferry-daemon on your PATH or next to this binary? ({source})", bin.display())
+    })
+}
+
+fn cmd_daemon_run() -> Result<(), String> {
+    let status = spawn_daemon(Stdio::inherit(), Stdio::inherit())?
+        .wait()
+        .map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("ferry-daemon exited with {status}"))
+    }
+}
+
+fn cmd_daemon_start() -> Result<(), String> {
+    if daemon_is_running() {
+        println!("ferry-daemon is already running");
+        return Ok(());
+    }
+
+    let data_dir = ferry_core::config::default_data_dir();
+    std::fs::create_dir_all(&data_dir)
+        .map_err(|source| format!("failed to create {}: {source}", data_dir.display()))?;
+    let log_path = data_dir.join("daemon.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|source| format!("failed to open {}: {source}", log_path.display()))?;
+    let log_err = log.try_clone().map_err(|e| e.to_string())?;
+
+    let child = spawn_daemon(Stdio::from(log), Stdio::from(log_err))?;
+    let pid = child.id();
+
+    for _ in 0..50 {
+        if daemon_is_running() {
+            println!("ferry-daemon started (pid {pid}), logging to {}", log_path.display());
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "ferry-daemon (pid {pid}) did not accept a connection within 5s — see {}",
+        log_path.display()
+    ))
+}
+
+fn cmd_daemon_stop() -> Result<(), String> {
+    if !daemon_is_running() {
+        println!("ferry-daemon is not running");
+        return Ok(());
+    }
+    cmd_quit()
+}
+
+fn looks_like_peer_id(peer: &str) -> bool {
+    peer.len() >= 8 && peer.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn resolve_peer(peer: &str) -> Result<String, String> {
+    let peers = match ipc_call(IpcRequest::RosterList)? {
+        IpcResult::RosterList(peers) => peers,
+        other => return Err(format!("unexpected response to RosterList: {other:?}")),
+    };
+    if peers.iter().any(|p| p.peer_id == peer) {
+        return Ok(peer.to_string());
+    }
+    let needle = peer.to_lowercase();
+    let mut matches = peers
+        .iter()
+        .filter(|p| p.display_name.to_lowercase() == needle)
+        .map(|p| (p.display_name.clone(), p.peer_id.clone()));
+    match (matches.next(), matches.next()) {
+        (Some((name, id)), None) => {
+            if !json_output() {
+                eprintln!("ferry: resolved '{name}' to {id}");
+            }
+            Ok(id)
+        }
+        (Some(_), Some(_)) => {
+            Err(format!("'{peer}' matches more than one peer by name — use the peer id (`ferry roster list`)"))
+        }
+        (None, _) if looks_like_peer_id(peer) => Ok(peer.to_string()),
+        (None, _) => Err(format!(
+            "'{peer}' is not a peer id and matches no roster name — pair first or check `ferry roster list`"
+        )),
+    }
+}
+
+fn cmd_send(peer: &str, path: &Path, ttl_secs: u32, is_burn_after_read: bool, notify_on_open: bool) -> Result<(), String> {
+    let peer_id = resolve_peer(peer)?;
     let absolute_path = std::fs::canonicalize(path)
         .map_err(|source| format!("failed to read {}: {source}", path.display()))?;
     let name = absolute_path
@@ -270,7 +438,7 @@ fn cmd_send(peer_id: &str, path: &Path, ttl_secs: u32, is_burn_after_read: bool,
         .ok_or_else(|| format!("{} has no file name", absolute_path.display()))?;
 
     match ipc_call(IpcRequest::Send {
-        peer_id: peer_id.to_string(),
+        peer_id: peer_id.clone(),
         source_path: absolute_path.to_string_lossy().into_owned(),
         name,
         ttl_secs,
@@ -750,9 +918,15 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Status => cmd_status(),
         Command::Quit => cmd_quit(),
-        Command::Send { peer_id, path, ttl, burn, notify_on_open } => {
-            cmd_send(&peer_id, &path, ttl, burn, notify_on_open)
+        Command::Send { peer, path, ttl, burn, notify_on_open } => {
+            cmd_send(&peer, &path, ttl, burn, notify_on_open)
         }
+        Command::Daemon { command } => match command {
+            DaemonCommand::Start => cmd_daemon_start(),
+            DaemonCommand::Stop => cmd_daemon_stop(),
+            DaemonCommand::Run => cmd_daemon_run(),
+            DaemonCommand::Status => cmd_status(),
+        },
         Command::Roster { command } => match command {
             RosterCommand::List => cmd_roster_list(),
             RosterCommand::Export { path } => cmd_roster_export(&path),
@@ -858,8 +1032,20 @@ mod tests {
         let cli = parse(&["ferry", "send", "peer-1", "/tmp/secrets.env", "--burn"]);
         assert!(matches!(
             cli.command,
-            Command::Send { ref peer_id, ref path, ttl, burn: true, notify_on_open: false }
-                if peer_id == "peer-1" && path == Path::new("/tmp/secrets.env") && ttl == DEFAULT_TTL_SECS
+            Command::Send { ref peer, ref path, ttl, burn: true, notify_on_open: false }
+                if peer == "peer-1" && path == Path::new("/tmp/secrets.env") && ttl == DEFAULT_TTL_SECS
+        ));
+    }
+
+    #[test]
+    fn daemon_subcommands_parse() {
+        assert!(matches!(
+            parse(&["ferry", "daemon", "start"]).command,
+            Command::Daemon { command: DaemonCommand::Start }
+        ));
+        assert!(matches!(
+            parse(&["ferry", "daemon", "run"]).command,
+            Command::Daemon { command: DaemonCommand::Run }
         ));
     }
 

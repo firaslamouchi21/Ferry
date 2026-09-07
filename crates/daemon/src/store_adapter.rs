@@ -204,7 +204,10 @@ impl Store for SqliteStore {
     fn finalize_inbound_delivered(&mut self, item_id: &str) -> Result<(), StoreError> {
         ferry_store::inbox::set_payload_ref(&self.conn, item_id, item_id)
             .map_err(|e| StoreError(e.to_string()))?;
-        ferry_store::inbox::set_delivered(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))
+        ferry_store::inbox::set_delivered(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        ferry_store::audit::append(&self.conn, "local", "item.delivered", Some(item_id), "delivered")
+            .map_err(|e| StoreError(e.to_string()))?;
+        Ok(())
     }
 
     fn mark_inbound_opened(&mut self, item_id: &str) -> Result<(), StoreError> {
@@ -219,6 +222,10 @@ impl Store for SqliteStore {
             ferry_store::payload::delete(&self.payload_dir, item_id).map_err(|e| StoreError(e.to_string()))?;
         }
         ferry_store::inbox::set_opened(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+
+        let outcome = if item.is_burn_after_read { "opened_and_burned" } else { "opened" };
+        ferry_store::audit::append(&self.conn, "local", "item.opened", Some(item_id), outcome)
+            .map_err(|e| StoreError(e.to_string()))?;
 
         if item.notify_on_open {
             ferry_store::receipts::queue(&self.conn, item_id, &item.peer_id)
@@ -452,6 +459,15 @@ impl Store for SqliteStore {
             added += 1;
         }
 
+        ferry_store::audit::append(
+            &self.conn,
+            "local",
+            "roster.imported",
+            None,
+            &format!("added {added} of {peer_count}, signed by {}", signed.signer.0),
+        )
+        .map_err(|e| StoreError(e.to_string()))?;
+
         Ok(ferry_core::ports::RosterImportSummary {
             signer_verifying_key_hex: signed.signer.0,
             peer_count,
@@ -474,7 +490,10 @@ impl Store for SqliteStore {
             &peer.signing_key_hex,
             &peer.sealing_key,
         )
-        .map_err(|e| StoreError(e.to_string()))
+        .map_err(|e| StoreError(e.to_string()))?;
+        ferry_store::audit::append(&self.conn, "local", "peer.paired", Some(&peer.peer_id), "ok")
+            .map_err(|e| StoreError(e.to_string()))?;
+        Ok(())
     }
 
     fn list_inbox_items(&self) -> Result<Vec<ferry_core::ports::InboxItemSummary>, StoreError> {
@@ -979,8 +998,18 @@ mod tests {
         let second_open = open_item(&mut receiver_channel, &mut receiver_store, &clock, &item_id);
         assert!(matches!(
             second_open,
-            Err(ferry_core::transfer::TransferError::IllegalTransition(_))
+            Err(ferry_core::transfer::TransferError::AlreadyOpened(_))
         ));
+
+        let audit = receiver_store.list_audit(50, None).unwrap();
+        assert!(audit.iter().any(|e| e.kind == "item.delivered" && e.item_id.as_deref() == Some(item_id.as_str())));
+        assert!(audit.iter().any(|e| e.kind == "item.opened"
+            && e.item_id.as_deref() == Some(item_id.as_str())
+            && e.outcome == "opened_and_burned"));
+        assert!(
+            audit.iter().all(|e| !e.outcome.contains("fox") && !e.kind.contains("fox")),
+            "audit rows must never carry payload bytes"
+        );
     }
 
     #[test]
@@ -1354,6 +1383,12 @@ mod tests {
         assert_eq!(imported.len(), 2);
         assert!(imported.iter().any(|p| p.peer_id == "peer-a"));
         assert!(imported.iter().any(|p| p.peer_id == "peer-b"));
+
+        let audit = importer_store.list_audit(50, None).unwrap();
+        assert!(
+            audit.iter().any(|e| e.kind == "roster.imported" && e.outcome.starts_with("added 2 of 2")),
+            "a roster import must leave one summary audit row"
+        );
     }
 
     #[test]
@@ -1425,5 +1460,11 @@ mod tests {
         let result = store.add_paired_peer(&peer);
         assert!(result.is_err(), "pairing with an already-paired peer_id must be rejected");
         assert_eq!(store.list_roster_peers().unwrap().len(), 1);
+
+        let audit = store.list_audit(50, None).unwrap();
+        assert!(
+            audit.iter().any(|e| e.kind == "peer.paired" && e.item_id.as_deref() == Some("aabbccdd")),
+            "a completed pairing must leave a peer.paired audit row"
+        );
     }
 }

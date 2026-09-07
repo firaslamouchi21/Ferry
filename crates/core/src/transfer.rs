@@ -35,6 +35,8 @@ pub enum TransferError {
     IllegalTransition(#[from] TransitionError<TransferState>),
     #[error("unknown item: {0}")]
     UnknownItem(String),
+    #[error("item {0} has already been opened")]
+    AlreadyOpened(String),
     #[error("item {0} has expired")]
     Expired(String),
     #[error("peer sent more data than the declared size of {declared} bytes for item {item_id}")]
@@ -461,6 +463,9 @@ pub fn check_openable(
     let current = store
         .get_inbound_state(item_id)?
         .ok_or_else(|| TransferError::UnknownItem(item_id.to_string()))?;
+    if current == TransferState::Opened {
+        return Err(TransferError::AlreadyOpened(item_id.to_string()));
+    }
     TRANSFER_TRANSITIONS.validate(current, TransferState::Opened)?;
     Ok(())
 }
@@ -1029,7 +1034,7 @@ mod tests {
         assert_eq!(store.inbound["item-1"].state, TransferState::Opened);
 
         let second = open_item(&mut channel, &mut store, &clock, "item-1");
-        assert!(matches!(second, Err(TransferError::IllegalTransition(_))));
+        assert!(matches!(second, Err(TransferError::AlreadyOpened(_))));
 
         drop(channel);
         let seen = drain.join().unwrap();
@@ -1066,7 +1071,7 @@ mod tests {
         assert!(store.inbound["item-1"].bytes.is_empty(), "burn must clear the payload once opened");
 
         let second = open_item_locally(&mut store, &clock, "item-1");
-        assert!(matches!(second, Err(TransferError::IllegalTransition(_))));
+        assert!(matches!(second, Err(TransferError::AlreadyOpened(_))));
     }
 
     #[test]

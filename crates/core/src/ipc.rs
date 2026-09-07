@@ -361,6 +361,12 @@ fn transfer_error_outcome(item_id: &str, err: TransferError) -> IpcOutcome {
                 message: format!("no such inbox item: {item_id}"),
             },
         },
+        TransferError::AlreadyOpened(_) => IpcOutcome::Err {
+            error: FerryError {
+                code: ErrorCode::IllegalStateTransition,
+                message: format!("item {item_id} has already been opened and cannot be opened again"),
+            },
+        },
         TransferError::IllegalTransition(err) => IpcOutcome::Err {
             error: FerryError {
                 code: ErrorCode::IllegalStateTransition,
