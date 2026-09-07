@@ -250,7 +250,40 @@ fn boot() -> Result<(), BootError> {
     Ok(())
 }
 
+const HELP: &str = "\
+ferry-daemon — the Ferry peer-to-peer daemon (one per machine)
+
+Usage: ferry-daemon [--help] [--version]
+
+Runs in the foreground: binds the P2P listener, advertises over mDNS, and
+serves the local IPC socket that the ferry CLI, the VS Code extension, and
+the desktop app connect to. Stop it with Ctrl-C or `ferry daemon stop`.
+
+Configuration is read from <data-dir>/config.toml (listen_port, data_dir,
+auto_accept_from_roster); a missing file uses the defaults. The identity
+key lives in the OS keychain, never on disk.
+
+Normally started by `ferry daemon start`, a login/service manager, or a
+GUI host — not launched by hand.";
+
 fn main() -> ExitCode {
+    let mut args = std::env::args().skip(1);
+    match args.next().as_deref() {
+        Some("--help" | "-h") => {
+            println!("{HELP}");
+            return ExitCode::SUCCESS;
+        }
+        Some("--version" | "-V") => {
+            println!("ferry-daemon {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        Some(other) => {
+            eprintln!("ferry-daemon: unexpected argument '{other}'\n\n{HELP}");
+            return ExitCode::from(2);
+        }
+        None => {}
+    }
+
     match boot() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {

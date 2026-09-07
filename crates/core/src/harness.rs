@@ -511,7 +511,7 @@ fn burn_after_read_second_open_fails() {
     assert!(store.inbound.get("item-1").unwrap().bytes.is_empty());
 
     let second = open_item(&mut channel, &mut store, &clock, "item-1");
-    assert!(matches!(second, Err(TransferError::IllegalTransition(_))));
+    assert!(matches!(second, Err(TransferError::AlreadyOpened(_))));
 
     drop(channel);
     assert_eq!(drain.join().unwrap(), 1);
