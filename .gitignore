@@ -46,6 +46,7 @@ design idea_utility_ui/
 *.db-shm
 *.sqlite
 *.sqlite3
+!crates/store/tests/fixtures/schema_v9.sqlite
 
 
 scratch/
