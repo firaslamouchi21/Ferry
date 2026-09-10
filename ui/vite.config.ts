@@ -19,7 +19,19 @@ export default defineConfig({
       "@bindings": fileURLToPath(new URL("../bindings", import.meta.url)),
     },
   },
-  server: { port: 5173 },
+  server: {
+    port: Number(process.env.PORT ?? 5173),
+    host: true,
+    strictPort: false,
+    hmr:
+      process.env.VITE_HMR_HOST || process.env.VITE_HMR_CLIENT_PORT
+        ? {
+            host: process.env.VITE_HMR_HOST,
+            clientPort: process.env.VITE_HMR_CLIENT_PORT ? Number(process.env.VITE_HMR_CLIENT_PORT) : undefined,
+            protocol: process.env.VITE_HMR_PROTOCOL,
+          }
+        : undefined,
+  },
   test: {
     environment: "jsdom",
     globals: true,

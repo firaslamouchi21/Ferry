@@ -1,3 +1,4 @@
+pub mod addr;
 pub mod chunk;
 pub mod discovery;
 pub mod framing;

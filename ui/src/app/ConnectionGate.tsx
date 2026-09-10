@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Copy, Play, RotateCw } from "lucide-react";
 import { useDaemonStatus, useFerry } from "@/lib/query";
 import { IPC_PROTOCOL_VERSION } from "@/lib/ipc";
@@ -44,12 +44,13 @@ function DaemonDownPanel({ connecting }: { connecting: boolean }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const autoTried = useRef(false);
 
   useEffect(() => {
     if (!connecting) setBusy(false);
   }, [connecting]);
 
-  async function onStart() {
+  const start = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
@@ -58,7 +59,15 @@ function DaemonDownPanel({ connecting }: { connecting: boolean }) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
     }
-  }
+  }, [client]);
+
+  useEffect(() => {
+    if (autoTried.current || !client.canStartDaemon()) return;
+    autoTried.current = true;
+    void start();
+  }, [client, start]);
+
+  const onStart = start;
 
   function onCopy() {
     void navigator.clipboard?.writeText(START_COMMAND).then(() => {

@@ -723,7 +723,9 @@ fn cmd_pair_listen(bind: &str, name: &str) -> Result<(), String> {
 }
 
 fn cmd_pair_connect(addr: &str, code: &str, name: &str) -> Result<(), String> {
-    let stream = TcpStream::connect(addr).map_err(|source| format!("failed to connect to {addr}: {source}"))?;
+    let target = ferry_net::addr::normalize_host_port(addr)?;
+    let stream =
+        TcpStream::connect(&target).map_err(|source| format!("failed to connect to {target}: {source}"))?;
     let identity = local_identity()?;
     let outcome = pairing::run_pairing_exchange(stream, code, &identity, name, confirm_verification_phrase)?;
     complete_pairing(outcome)

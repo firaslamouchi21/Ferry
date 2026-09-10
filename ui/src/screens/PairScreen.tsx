@@ -162,7 +162,12 @@ export function PairScreen() {
               <Button
                 variant="primary"
                 disabled={busy || !displayName || !addr || !code}
-                onClick={() => begin({ role: "connect", params: { addr, code, display_name: displayName } })}
+                onClick={() =>
+                  begin({
+                    role: "connect",
+                    params: { addr: addr.trim(), code: code.trim(), display_name: displayName.trim() },
+                  })
+                }
               >
                 {busy ? t("pair.connecting") : t("pair.connect")}
               </Button>

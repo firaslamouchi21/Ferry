@@ -88,7 +88,11 @@ impl PairingRegistry {
                     l.accept().map(|(s, _)| s).map_err(|e| format!("no peer connected: {e}"))
                 }
                 (PairMode::Connect { addr, .. }, _) => {
-                    TcpStream::connect(addr).map_err(|e| format!("could not reach {addr}: {e}"))
+                    match ferry_net::addr::normalize_host_port(addr) {
+                        Ok(target) => TcpStream::connect(&target)
+                            .map_err(|e| format!("could not reach {target}: {e}")),
+                        Err(e) => Err(e),
+                    }
                 }
                 _ => Err("internal pairing setup error".to_string()),
             };
@@ -295,4 +299,5 @@ mod tests {
         assert!(reg_a.take_pending_persist(&begin_a.pairing_id).is_none());
         assert!(reg_b.take_pending_persist(&begin_b.pairing_id).is_none());
     }
+
 }

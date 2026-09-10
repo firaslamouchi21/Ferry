@@ -109,7 +109,18 @@ export class WebSocketTransport implements Transport {
   private connect() {
     if (this.stopped) return;
     this.setPhase("connecting");
-    const ws = new WebSocket(this.url);
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(this.url);
+    } catch (err) {
+      console.error(`ferry: could not open ${this.url}: ${String((err as Error).message ?? err)}`);
+      this.setPhase("disconnected");
+      if (!this.stopped) {
+        setTimeout(() => this.connect(), this.reconnectDelay);
+        this.reconnectDelay = Math.min(this.reconnectDelay * 2, 8000);
+      }
+      return;
+    }
     this.ws = ws;
 
     ws.onopen = () => {
