@@ -96,13 +96,16 @@ fn write_lock_metadata(mut lock_file: &File, config: &Config) -> std::io::Result
     writeln!(lock_file, "port={}", config.listen_port)
 }
 
-fn open_store(store_path: &Path, payload_dir: &Path) -> Result<store_adapter::SqliteStore, BootError> {
+fn open_store(
+    store_path: &Path,
+    payload_dir: &Path,
+    identity: &ferry_crypto::identity::Identity,
+) -> Result<store_adapter::SqliteStore, BootError> {
     let conn = ferry_store::connection::open(store_path).map_err(|source| BootError::OpenStore {
         path: store_path.to_path_buf(),
         source,
     })?;
-    let identity = ferry_crypto::identity::Identity::load_or_generate()?;
-    Ok(store_adapter::SqliteStore::new(conn, payload_dir.to_path_buf(), identity))
+    Ok(store_adapter::SqliteStore::new(conn, payload_dir.to_path_buf(), identity.clone()))
 }
 
 fn boot() -> Result<(), BootError> {
@@ -116,15 +119,22 @@ fn boot() -> Result<(), BootError> {
         source,
     })?;
 
+    let key_backend = ferry_crypto::identity::KeyBackend::resolve(
+        config.identity_keystore == ferry_core::config::KeystoreMode::File,
+        &config.data_dir,
+        config.identity_passphrase_file.as_deref(),
+    )?;
+    let identity = ferry_crypto::identity::Identity::load_or_generate_with(&key_backend)?;
+
     let store_path = config.data_dir.join("ferry.sqlite");
     let payload_dir = config.data_dir.join("payloads");
 
-    let mut p2p_store = open_store(&store_path, &payload_dir)?;
+    let mut p2p_store = open_store(&store_path, &payload_dir, &identity)?;
     let p2p_roster_conn = ferry_store::connection::open(&store_path).map_err(|source| BootError::OpenStore {
         path: store_path.clone(),
         source,
     })?;
-    let mut discovery_store = open_store(&store_path, &payload_dir)?;
+    let mut discovery_store = open_store(&store_path, &payload_dir, &identity)?;
     let discovery_roster_conn = ferry_store::connection::open(&store_path).map_err(|source| BootError::OpenStore {
         path: store_path.clone(),
         source,
@@ -137,7 +147,7 @@ fn boot() -> Result<(), BootError> {
     let socket_path = ferry_core::config::ipc_socket_path(&config.data_dir);
     let event_bus = std::sync::Arc::new(ferry_daemon::event_bus::EventBus::new());
     let presence = std::sync::Arc::new(ferry_daemon::presence::Presence::new());
-    let mut ipc_store = open_store(&store_path, &payload_dir)?.with_presence(presence.clone());
+    let mut ipc_store = open_store(&store_path, &payload_dir, &identity)?.with_presence(presence.clone());
 
     let socket_for_signal = socket_path.clone();
     if let Err(err) = ctrlc::set_handler(move || {
@@ -244,7 +254,43 @@ fn boot() -> Result<(), BootError> {
 
     let mut ipc_source = ferry_daemon::file_source::FilePathSource::new(ipc_store.identity().clone());
     let pairing = ferry_daemon::pairing::PairingRegistry::new(ipc_store.identity().clone());
-    ferry_daemon::ipc_server::serve(&listener, &mut ipc_store, &clock, &runtime, &event_bus, &pairing, &mut ipc_source)?;
+
+    let token_store_for = |cfg: &ferry_core::config::Config| match cfg.provider_token_file.as_deref() {
+        Some(passphrase_file) => {
+            let passphrase = std::fs::read_to_string(passphrase_file)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default();
+            ferry_crypto::secret_store::SecretStore::file_with_passphrase_str(
+                cfg.data_dir.join("provider-github.token.age"),
+                &passphrase,
+            )
+        }
+        None => ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.provider", "github"),
+    };
+
+    if config.remote_features_enabled {
+        let worker_store = open_store(&store_path, &payload_dir, &identity)?;
+        let worker_provider = ferry_daemon::provider::ProviderRegistry::new(token_store_for(&config), true, config.provider_github_client_id.clone());
+        let event_bus_worker = event_bus.clone();
+        std::thread::spawn(move || {
+            let emit = |event| event_bus_worker.emit(event);
+            ferry_daemon::remote_worker::run(worker_store, worker_provider, emit);
+        });
+    }
+
+    let provider =
+        ferry_daemon::provider::ProviderRegistry::new(token_store_for(&config), config.remote_features_enabled, config.provider_github_client_id.clone());
+
+    ferry_daemon::ipc_server::serve(
+        &listener,
+        &mut ipc_store,
+        &clock,
+        &runtime,
+        &event_bus,
+        &pairing,
+        &provider,
+        &mut ipc_source,
+    )?;
     let _ = std::fs::remove_file(&socket_path);
 
     Ok(())
@@ -260,8 +306,19 @@ serves the local IPC socket that the ferry CLI, the VS Code extension, and
 the desktop app connect to. Stop it with Ctrl-C or `ferry daemon stop`.
 
 Configuration is read from <data-dir>/config.toml (listen_port, data_dir,
-auto_accept_from_roster); a missing file uses the defaults. The identity
-key lives in the OS keychain, never on disk.
+auto_accept_from_roster, identity_keystore, remote_features_enabled,
+provider_token_file, provider_github_client_id); a missing file uses the
+defaults. The identity key lives in the OS keychain by default, or — with
+identity_keystore = \"file\" plus $FERRY_IDENTITY_PASSPHRASE — in an
+age-encrypted file, for headless boxes. Never stored unwrapped.
+
+The optional GitHub features (publish a sealed item as a gist, fetch a
+signed team roster) are off unless remote_features_enabled = true, and make
+no network call until you connect an account. The token lives in the
+keychain, or an age file when provider_token_file names a passphrase file.
+Device-flow login needs a registered OAuth App id in
+provider_github_client_id (or $FERRY_GITHUB_CLIENT_ID); a personal access
+token needs neither. See docs/GITHUB_APP_SETUP.md.
 
 Normally started by `ferry daemon start`, a login/service manager, or a
 GUI host — not launched by hand.";

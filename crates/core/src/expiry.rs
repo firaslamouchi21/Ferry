@@ -9,10 +9,18 @@ pub struct ExpiryDeadline {
     pub expires_at_wall_estimate_millis: i64,
 }
 
+pub const MAX_PLAUSIBLE_TTL_MILLIS: i64 = 400 * 24 * 60 * 60 * 1000;
+
+#[derive(Clone, Copy)]
+enum NowSource {
+    System { process_start: Instant },
+    Fixed { wall_millis: i64, uptime_millis: i64 },
+}
+
 #[derive(Clone, Copy)]
 pub struct ExpiryClock {
     session_id: Uuid,
-    process_start: Instant,
+    source: NowSource,
 }
 
 impl Default for ExpiryClock {
@@ -25,31 +33,49 @@ impl ExpiryClock {
     pub fn new() -> Self {
         Self {
             session_id: Uuid::new_v4(),
-            process_start: Instant::now(),
+            source: NowSource::System {
+                process_start: Instant::now(),
+            },
+        }
+    }
+
+    pub fn fixed(session_id: Uuid, wall_millis: i64, uptime_millis: i64) -> Self {
+        Self {
+            session_id,
+            source: NowSource::Fixed {
+                wall_millis,
+                uptime_millis,
+            },
         }
     }
 
     fn uptime_millis(&self) -> i64 {
-        self.process_start.elapsed().as_millis() as i64
+        match self.source {
+            NowSource::System { process_start } => process_start.elapsed().as_millis() as i64,
+            NowSource::Fixed { uptime_millis, .. } => uptime_millis,
+        }
     }
 
-    fn wall_now_millis() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock is before the unix epoch")
-            .as_millis() as i64
+    fn wall_now_millis(&self) -> i64 {
+        match self.source {
+            NowSource::System { .. } => SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
+            NowSource::Fixed { wall_millis, .. } => wall_millis,
+        }
     }
 
     pub fn now_millis(&self) -> i64 {
-        Self::wall_now_millis()
+        self.wall_now_millis()
     }
 
     pub fn compute_deadline(&self, ttl_secs: u32) -> ExpiryDeadline {
-        let ttl_millis = i64::from(ttl_secs) * 1000;
+        let ttl_millis = i64::from(ttl_secs).saturating_mul(1000);
         ExpiryDeadline {
             session_id: self.session_id.to_string(),
-            expires_at_monotonic_millis: self.uptime_millis() + ttl_millis,
-            expires_at_wall_estimate_millis: Self::wall_now_millis() + ttl_millis,
+            expires_at_monotonic_millis: self.uptime_millis().saturating_add(ttl_millis),
+            expires_at_wall_estimate_millis: self.wall_now_millis().saturating_add(ttl_millis),
         }
     }
 
@@ -57,7 +83,13 @@ impl ExpiryClock {
         if deadline.session_id == self.session_id.to_string() {
             self.uptime_millis() >= deadline.expires_at_monotonic_millis
         } else {
-            Self::wall_now_millis() >= deadline.expires_at_wall_estimate_millis
+            let wall_now = self.wall_now_millis();
+            if deadline.expires_at_wall_estimate_millis
+                > wall_now.saturating_add(MAX_PLAUSIBLE_TTL_MILLIS)
+            {
+                return true;
+            }
+            wall_now >= deadline.expires_at_wall_estimate_millis
         }
     }
 }
@@ -116,6 +148,50 @@ mod tests {
             restarted_clock.is_expired(&past_deadline),
             "once the monotonic session can no longer be trusted, an expired-per-wall-clock deadline must expire"
         );
+    }
+
+    #[test]
+    fn a_fixed_clock_expires_exactly_at_its_ttl_boundary() {
+        let sid = Uuid::new_v4();
+        let clock = ExpiryClock::fixed(sid, 1_000_000, 50_000);
+        let deadline = clock.compute_deadline(10);
+        assert!(!clock.is_expired(&deadline));
+
+        let later = ExpiryClock::fixed(sid, 1_000_000, 60_000);
+        assert!(later.is_expired(&deadline));
+    }
+
+    #[test]
+    fn an_implausible_stored_wall_deadline_from_a_foreign_session_expires_conservatively() {
+        let writer = ExpiryClock::fixed(Uuid::new_v4(), 1_000_000, 0);
+        let mut deadline = writer.compute_deadline(3600);
+        deadline.expires_at_wall_estimate_millis = i64::MAX;
+
+        let reader = ExpiryClock::fixed(Uuid::new_v4(), 2_000_000, 0);
+        assert!(
+            reader.is_expired(&deadline),
+            "a foreign-session deadline further out than any plausible TTL must not grant an unbounded lifetime"
+        );
+    }
+
+    #[test]
+    fn a_pre_epoch_system_clock_does_not_panic_and_expires_conservatively() {
+        let clock = ExpiryClock::new();
+        let _ = clock.now_millis();
+        let foreign = ExpiryDeadline {
+            session_id: Uuid::new_v4().to_string(),
+            expires_at_monotonic_millis: 0,
+            expires_at_wall_estimate_millis: 1,
+        };
+        assert!(clock.is_expired(&foreign));
+    }
+
+    #[test]
+    fn ttl_arithmetic_saturates_instead_of_overflowing() {
+        let clock = ExpiryClock::fixed(Uuid::new_v4(), i64::MAX - 10, i64::MAX - 10);
+        let deadline = clock.compute_deadline(u32::MAX);
+        assert_eq!(deadline.expires_at_monotonic_millis, i64::MAX);
+        assert_eq!(deadline.expires_at_wall_estimate_millis, i64::MAX);
     }
 
     #[test]

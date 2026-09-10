@@ -45,7 +45,7 @@ fn user_facing_error(message: &str) -> &str {
 }
 
 #[derive(Parser)]
-#[command(name = "ferry", about = "Ferry — serverless peer-to-peer file, secret, and message transfer")]
+#[command(name = "ferry", version, about = "Ferry — serverless peer-to-peer file, secret, and message transfer")]
 #[command(after_help = "Exit codes: 0 ok · 1 failure · 2 usage · 3 daemon unreachable · 4 protocol error")]
 struct Cli {
     #[arg(long, global = true, help = "emit the raw IPC result as JSON and nothing else")]
@@ -131,8 +131,69 @@ enum Command {
         #[arg(long, help = "only events strictly before this unix-millis timestamp")]
         before_millis: Option<i64>,
     },
+    #[command(about = "Send and read short messages, threaded per peer")]
+    Message {
+        #[command(subcommand)]
+        command: MessageCommand,
+    },
     #[command(about = "Stream daemon events until interrupted")]
     Watch,
+    #[command(about = "Optional GitHub connection for publishing sealed items and fetching a team roster")]
+    Provider {
+        #[command(subcommand)]
+        command: ProviderCommand,
+    },
+    #[command(about = "Publish an already-delivered sealed item as a private GitHub gist (opt-in)")]
+    Gist {
+        #[command(subcommand)]
+        command: GistCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProviderCommand {
+    #[command(about = "Show whether a provider is enabled and connected")]
+    Status,
+    #[command(about = "Connect to GitHub — pass --pat to paste a token, otherwise a device code is printed")]
+    Connect {
+        #[arg(long, help = "a GitHub personal access token; omit to use the browser device flow")]
+        pat: Option<String>,
+    },
+    #[command(about = "Forget the stored provider token")]
+    Disconnect,
+    #[command(about = "Fetch a signed roster from <owner>/<repo>/<path>[@ref], show the diff, and import on confirm")]
+    Fetch {
+        locator: String,
+        #[arg(long, help = "skip the confirmation prompt")]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GistCommand {
+    #[command(about = "Publish item <item-id> as a private gist and print the link")]
+    Publish {
+        item_id: String,
+        #[arg(long, help = "skip the confirmation prompt")]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MessageCommand {
+    #[command(about = "List conversations, most recent first")]
+    Threads,
+    #[command(about = "Print the conversation with one peer, oldest first")]
+    Thread {
+        #[arg(help = "the peer's id, or a roster display name")]
+        peer: String,
+    },
+    #[command(about = "Send a short message to a peer")]
+    Send {
+        #[arg(help = "the peer's id, or a roster display name")]
+        peer: String,
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -398,6 +459,24 @@ fn looks_like_peer_id(peer: &str) -> bool {
     peer.len() >= 8 && peer.chars().all(|c| c.is_ascii_hexdigit())
 }
 
+fn local_identity() -> Result<ferry_crypto::identity::Identity, String> {
+    let data_dir = ferry_core::config::default_data_dir();
+    let raw: ferry_core::config::RawConfig = std::fs::read_to_string(data_dir.join("config.toml"))
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default();
+    let config = raw
+        .validate(data_dir.clone())
+        .map_err(|e| format!("invalid config.toml: {e}"))?;
+    let backend = ferry_crypto::identity::KeyBackend::resolve(
+        config.identity_keystore == ferry_core::config::KeystoreMode::File,
+        &config.data_dir,
+        config.identity_passphrase_file.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
+    ferry_crypto::identity::Identity::load_or_generate_with(&backend).map_err(|e| e.to_string())
+}
+
 fn resolve_peer(peer: &str) -> Result<String, String> {
     let peers = match ipc_call(IpcRequest::RosterList)? {
         IpcResult::RosterList(peers) => peers,
@@ -450,6 +529,60 @@ fn cmd_send(peer: &str, path: &Path, ttl_secs: u32, is_burn_after_read: bool, no
             Ok(())
         }
         other => Err(format!("unexpected response to Send: {other:?}")),
+    }
+}
+
+fn cmd_message_send(peer: &str, text: &str) -> Result<(), String> {
+    let peer_id = resolve_peer(peer)?;
+    let name: String = text.chars().take(64).collect();
+    match ipc_call(IpcRequest::SendInline {
+        peer_id: peer_id.clone(),
+        name,
+        kind: ferry_proto::states::ItemKind::Message,
+        content_base64: base64::engine::general_purpose::STANDARD.encode(text.as_bytes()),
+        ttl_secs: 604_800,
+        is_burn_after_read: false,
+        notify_on_open: false,
+    })? {
+        IpcResult::Send { item_id } => {
+            println!("queued {item_id} for {peer_id}");
+            Ok(())
+        }
+        other => Err(format!("unexpected response to SendInline: {other:?}")),
+    }
+}
+
+fn cmd_message_threads() -> Result<(), String> {
+    match ipc_call(IpcRequest::MessageThreads)? {
+        IpcResult::MessageThreads(threads) => {
+            emit(&threads, || {
+                if threads.is_empty() {
+                    println!("no conversations yet");
+                    return;
+                }
+                for th in &threads {
+                    println!("{}  {:<16}  ({}) {}", th.peer_id, th.display_name, th.count, th.last_body);
+                }
+            });
+            Ok(())
+        }
+        other => Err(format!("unexpected response to MessageThreads: {other:?}")),
+    }
+}
+
+fn cmd_message_thread(peer: &str) -> Result<(), String> {
+    let peer_id = resolve_peer(peer)?;
+    match ipc_call(IpcRequest::MessageThread { peer_id })? {
+        IpcResult::MessageThread(messages) => {
+            emit(&messages, || {
+                for m in &messages {
+                    let who = if m.outbound { "→" } else { "←" };
+                    println!("{who} {}", m.body);
+                }
+            });
+            Ok(())
+        }
+        other => Err(format!("unexpected response to MessageThread: {other:?}")),
     }
 }
 
@@ -584,14 +717,14 @@ fn cmd_pair_listen(bind: &str, name: &str) -> Result<(), String> {
         .map_err(|source| format!("failed to accept a connection: {source}"))?;
     println!("connection from {peer_addr}");
 
-    let identity = ferry_crypto::identity::Identity::load_or_generate().map_err(|e| e.to_string())?;
+    let identity = local_identity()?;
     let outcome = pairing::run_pairing_exchange(stream, &code, &identity, name, confirm_verification_phrase)?;
     complete_pairing(outcome)
 }
 
 fn cmd_pair_connect(addr: &str, code: &str, name: &str) -> Result<(), String> {
     let stream = TcpStream::connect(addr).map_err(|source| format!("failed to connect to {addr}: {source}"))?;
-    let identity = ferry_crypto::identity::Identity::load_or_generate().map_err(|e| e.to_string())?;
+    let identity = local_identity()?;
     let outcome = pairing::run_pairing_exchange(stream, code, &identity, name, confirm_verification_phrase)?;
     complete_pairing(outcome)
 }
@@ -700,6 +833,124 @@ fn confirm(prompt: &str, skip: bool) -> Result<bool, String> {
     let mut answer = String::new();
     io::stdin().read_line(&mut answer).map_err(|e| e.to_string())?;
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
+}
+
+fn cmd_provider_status() -> Result<(), String> {
+    match ipc_call(IpcRequest::ProviderStatus)? {
+        IpcResult::ProviderStatus(s) => {
+            emit(&s, || {
+                println!("provider:  {}", s.provider);
+                println!("enabled:   {}", s.enabled);
+                println!("connected: {}", s.connected);
+                if let Some(login) = &s.login {
+                    println!("login:     {login}");
+                }
+            });
+            Ok(())
+        }
+        other => Err(format!("unexpected response to ProviderStatus: {other:?}")),
+    }
+}
+
+fn cmd_provider_connect(pat: Option<String>) -> Result<(), String> {
+    match ipc_call(IpcRequest::ProviderConnect { pat })? {
+        IpcResult::ProviderStatus(s) => {
+            println!("connected to {} as {}", s.provider, s.login.as_deref().unwrap_or("?"));
+            Ok(())
+        }
+        IpcResult::ProviderAuth(a) => {
+            println!("open {} and enter code: {}", a.verification_uri, a.user_code);
+            println!("waiting for authorization (expires in {}s)...", a.expires_in_secs);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(a.expires_in_secs as u64);
+            loop {
+                if std::time::Instant::now() >= deadline {
+                    return Err("device authorization timed out".into());
+                }
+                std::thread::sleep(std::time::Duration::from_secs(a.interval_secs.max(1) as u64));
+                match ipc_call(IpcRequest::ProviderConnectPoll)? {
+                    IpcResult::ProviderStatus(s) => {
+                        println!("connected to {} as {}", s.provider, s.login.as_deref().unwrap_or("?"));
+                        return Ok(());
+                    }
+                    IpcResult::ProviderAuthPending => continue,
+                    other => return Err(format!("unexpected poll response: {other:?}")),
+                }
+            }
+        }
+        other => Err(format!("unexpected response to ProviderConnect: {other:?}")),
+    }
+}
+
+fn cmd_provider_disconnect() -> Result<(), String> {
+    match ipc_call(IpcRequest::ProviderDisconnect)? {
+        IpcResult::Ack => {
+            println!("disconnected — the stored token was cleared");
+            Ok(())
+        }
+        other => Err(format!("unexpected response to ProviderDisconnect: {other:?}")),
+    }
+}
+
+fn cmd_provider_fetch(locator: &str, skip_confirm: bool) -> Result<(), String> {
+    let preview = match ipc_call(IpcRequest::RosterFetch { locator: locator.to_string() })? {
+        IpcResult::RosterFetchPreview(p) => p,
+        other => return Err(format!("unexpected response to RosterFetch: {other:?}")),
+    };
+    println!("signer key: {}", preview.signer_verifying_key_hex);
+    println!(
+        "signer is {}",
+        if preview.known_signer { "already in your roster — recognised" } else { "UNKNOWN — verify this fingerprint out of band" }
+    );
+    println!("{} new peer(s), {} already present:", preview.adds, preview.already_present);
+    for e in &preview.entries {
+        println!("  {} {}  {}", if e.already_present { "=" } else { "+" }, e.peer_id, e.display_name);
+    }
+    if preview.adds == 0 {
+        println!("nothing to import");
+        return Ok(());
+    }
+    if !confirm("import this roster?", skip_confirm)? {
+        println!("cancelled");
+        return Ok(());
+    }
+    let job_id = match ipc_call(IpcRequest::RosterApplyRemote { locator: locator.to_string() })? {
+        IpcResult::RemoteJob(j) => j.job_id,
+        other => return Err(format!("unexpected response to RosterApplyRemote: {other:?}")),
+    };
+    let status = wait_for_remote_job(&job_id)?;
+    println!("{}", status.result_summary.as_deref().unwrap_or("done"));
+    Ok(())
+}
+
+fn wait_for_remote_job(job_id: &str) -> Result<ferry_proto::ipc::RemoteJobStatusView, String> {
+    for _ in 0..120 {
+        match ipc_call(IpcRequest::RemoteJobStatus { job_id: job_id.to_string() })? {
+            IpcResult::RemoteJobStatus(s) => match s.phase.as_str() {
+                "done" => return Ok(s),
+                "failed" => return Err(s.error.unwrap_or_else(|| "the job failed".into())),
+                _ => std::thread::sleep(std::time::Duration::from_millis(500)),
+            },
+            other => return Err(format!("unexpected response to RemoteJobStatus: {other:?}")),
+        }
+    }
+    Err("the remote job did not finish within 60s".into())
+}
+
+fn cmd_gist_publish(item_id: &str, skip_confirm: bool) -> Result<(), String> {
+    println!("publishing puts an ENCRYPTED copy on GitHub's servers.");
+    println!("it reveals the recipient's public key and the ciphertext size,");
+    println!("and burn-after-read can no longer be honoured once it leaves this machine.");
+    if !confirm("publish this sealed item as a private gist?", skip_confirm)? {
+        println!("cancelled");
+        return Ok(());
+    }
+    let job_id = match ipc_call(IpcRequest::GistPublish { item_id: item_id.to_string() })? {
+        IpcResult::RemoteJob(j) => j.job_id,
+        other => return Err(format!("unexpected response to GistPublish: {other:?}")),
+    };
+    let status = wait_for_remote_job(&job_id)?;
+    println!("published: {}", status.result_url.as_deref().unwrap_or("(no url returned)"));
+    Ok(())
 }
 
 fn cmd_identity() -> Result<(), String> {
@@ -960,6 +1211,20 @@ fn main() -> ExitCode {
             SentCommand::Retry { item_id } => cmd_sent_retry(&item_id),
         },
         Command::Activity { limit, before_millis } => cmd_activity(limit, before_millis),
+        Command::Provider { command } => match command {
+            ProviderCommand::Status => cmd_provider_status(),
+            ProviderCommand::Connect { pat } => cmd_provider_connect(pat),
+            ProviderCommand::Disconnect => cmd_provider_disconnect(),
+            ProviderCommand::Fetch { locator, yes } => cmd_provider_fetch(&locator, yes),
+        },
+        Command::Gist { command } => match command {
+            GistCommand::Publish { item_id, yes } => cmd_gist_publish(&item_id, yes),
+        },
+        Command::Message { command } => match command {
+            MessageCommand::Threads => cmd_message_threads(),
+            MessageCommand::Thread { peer } => cmd_message_thread(&peer),
+            MessageCommand::Send { peer, text } => cmd_message_send(&peer, &text),
+        },
         Command::Watch => cmd_watch(),
     };
 

@@ -32,6 +32,16 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }} -p ferry-daemon -p ferry
 
+      - name: Smoke-run the freshly built binaries
+        shell: bash
+        run: |
+          ext=""
+          [ "${{ matrix.os }}" = "windows-latest" ] && ext=".exe"
+          "target/${{ matrix.target }}/release/ferry-daemon$ext" --version
+          "target/${{ matrix.target }}/release/ferry-daemon$ext" --help | head -1
+          "target/${{ matrix.target }}/release/ferry$ext" --version
+          "target/${{ matrix.target }}/release/ferry$ext" --help | head -1
+
       - name: Stage artifacts
         shell: bash
         run: |
@@ -77,8 +87,17 @@ jobs:
           path: dist/*
 
   vsix:
-    name: package .vsix
+    name: package .vsix (${{ matrix.vsce_target }})
+    needs: binaries
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { vsce_target: linux-x64, daemon_artifact: ferry-linux-x86_64, daemon_file: ferry-daemon-linux-x86_64 }
+          - { vsce_target: darwin-arm64, daemon_artifact: ferry-macos-aarch64, daemon_file: ferry-daemon-macos-aarch64 }
+          - { vsce_target: darwin-x64, daemon_artifact: ferry-macos-x86_64, daemon_file: ferry-daemon-macos-x86_64 }
+          - { vsce_target: win32-x64, daemon_artifact: ferry-windows-x86_64, daemon_file: ferry-daemon-windows-x86_64.exe }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -92,11 +111,56 @@ jobs:
       - name: Regenerate bindings for the UI build
         run: cargo test --package ferry-proto --locked
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter ferry-vscode package
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.daemon_artifact }}
+          path: daemon-bin
+      - name: Package the platform .vsix with its daemon bundled
+        run: >
+          node scripts/package.mjs
+          --target ${{ matrix.vsce_target }}
+          --daemon "$GITHUB_WORKSPACE/daemon-bin/${{ matrix.daemon_file }}"
+          --out "ferry-${{ matrix.vsce_target }}.vsix"
+        working-directory: ext/vscode
       - uses: actions/upload-artifact@v4
         with:
-          name: ferry-vsix
-          path: ext/vscode/ferry.vsix
+          name: ferry-vsix-${{ matrix.vsce_target }}
+          path: ext/vscode/ferry-${{ matrix.vsce_target }}.vsix
+
+  publish-extension:
+    name: publish .vsix to the marketplaces
+    needs: vsix
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        working-directory: ext/vscode
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ferry-vsix-*
+          path: vsix
+          merge-multiple: true
+      - name: Publish to the VS Code Marketplace
+        if: env.VSCE_PAT != ''
+        working-directory: ext/vscode
+        run: pnpm exec vsce publish --no-dependencies --packagePath $(ls ../../vsix/*.vsix)
+      - name: Publish to Open VSX
+        if: env.OVSX_PAT != ''
+        working-directory: ext/vscode
+        run: |
+          for f in ../../vsix/*.vsix; do pnpm exec ovsx publish "$f" -p "$OVSX_PAT" || true; done
+      - name: Note when publishing was skipped
+        if: env.VSCE_PAT == '' && env.OVSX_PAT == ''
+        run: echo "Neither VSCE_PAT nor OVSX_PAT is set — see docs/VSCODE_MARKETPLACE_SETUP.md. Skipping marketplace publish; the .vsix files are still attached to the GitHub Release."
 
   release:
     name: publish GitHub Release

@@ -17,6 +17,10 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
     pub fn new(conn: Connection, payload_dir: PathBuf, local_identity: Identity) -> Self {
         Self { conn, payload_dir, local_identity, presence: None }
     }
@@ -167,6 +171,12 @@ impl Store for SqliteStore {
             ferry_store::payload::append_framed(&self.payload_dir, item_id, &framed)
                 .map_err(|e| StoreError(e.to_string()))?;
         } else {
+            ferry_store::payload::truncate_to(
+                &self.payload_dir,
+                item_id,
+                item.bytes_received_count as u64,
+            )
+            .map_err(|e| StoreError(e.to_string()))?;
             ferry_store::payload::append(&self.payload_dir, item_id, bytes)
                 .map_err(|e| StoreError(e.to_string()))?;
         }
@@ -224,8 +234,9 @@ impl Store for SqliteStore {
         ferry_store::inbox::set_opened(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
 
         let outcome = if item.is_burn_after_read { "opened_and_burned" } else { "opened" };
-        ferry_store::audit::append(&self.conn, "local", "item.opened", Some(item_id), outcome)
-            .map_err(|e| StoreError(e.to_string()))?;
+        if let Err(e) = ferry_store::audit::append(&self.conn, "local", "item.opened", Some(item_id), outcome) {
+            eprintln!("ferry-daemon: WARNING: item {item_id} was opened but the audit row could not be written: {e}");
+        }
 
         if item.notify_on_open {
             ferry_store::receipts::queue(&self.conn, item_id, &item.peer_id)
@@ -356,10 +367,59 @@ impl Store for SqliteStore {
         }))
     }
 
-    fn record_outbound_dropped(&mut self, item_id: &str, actor: &str) -> Result<(), StoreError> {
-        ferry_store::audit::append(&self.conn, actor, "item.outbox_expired", Some(item_id), "dropped")
+    fn record_outbound_dropped(&mut self, item_id: &str, actor: &str, cause: &str) -> Result<(), StoreError> {
+        let outcome = if cause.is_empty() { "dropped" } else { cause };
+        ferry_store::audit::append(&self.conn, actor, "item.outbox_expired", Some(item_id), outcome)
             .map(|_| ())
             .map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn set_outbound_last_error(&mut self, item_id: &str, reason: &str) -> Result<(), StoreError> {
+        ferry_store::outbound::set_last_error(&self.conn, item_id, reason)
+            .map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn record_provider_event(&mut self, kind: &str, outcome: &str) -> Result<(), StoreError> {
+        ferry_store::audit::append(&self.conn, "local", kind, None, outcome)
+            .map(|_| ())
+            .map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn enqueue_remote_job(&mut self, kind: &str, params_json: &str) -> Result<String, StoreError> {
+        ferry_store::remote_jobs::enqueue(&self.conn, kind, params_json).map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn get_remote_job(&self, job_id: &str) -> Result<Option<ferry_core::ports::RemoteJobRow>, StoreError> {
+        Ok(ferry_store::remote_jobs::get(&self.conn, job_id)
+            .map_err(|e| StoreError(e.to_string()))?
+            .map(|j| ferry_core::ports::RemoteJobRow {
+                job_id: j.id,
+                kind: j.kind,
+                phase: j.state,
+                result: j.result,
+                error: j.error,
+            }))
+    }
+
+    fn roster_signing_keys_hex(&self) -> Result<Vec<String>, StoreError> {
+        ferry_store::roster::list_peers(&self.conn)
+            .map(|peers| peers.into_iter().map(|p| p.signing_key).collect())
+            .map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn read_outbound_content(&self, item_id: &str) -> Result<Vec<u8>, StoreError> {
+        use std::io::Read;
+        let item = ferry_store::outbound::get(&self.conn, item_id)
+            .map_err(|e| StoreError(e.to_string()))?
+            .ok_or_else(|| StoreError("no such outbound item".into()))?;
+        let mut reader = crate::staged::open_source(
+            std::path::Path::new(&item.source_path),
+            &self.local_identity,
+        )
+        .map_err(|e| StoreError(e.to_string()))?;
+        let mut buf = Vec::new();
+        reader.read_to_end(&mut buf).map_err(|e| StoreError(e.to_string()))?;
+        Ok(buf)
     }
 
     fn read_inbound_plaintext(&self, item_id: &str) -> Result<Vec<u8>, StoreError> {
@@ -536,7 +596,7 @@ impl Store for SqliteStore {
                 size_bytes: item.size_bytes.max(0) as u64,
                 queued_at_millis: Some(item.created_at_millis),
                 last_attempt_at_millis: entry.as_ref().and_then(|e| e.last_attempted_at_millis),
-                last_error: None,
+                last_error: item.last_error,
             });
         }
         Ok(out)
@@ -567,7 +627,8 @@ impl Store for SqliteStore {
     }
 
     fn abort_outbound(&mut self, item_id: &str, actor: &str) -> Result<(), StoreError> {
-        self.record_outbound_dropped(item_id, actor)?;
+        self.record_outbound_dropped(item_id, actor, "aborted")?;
+        let _ = ferry_store::outbound::set_last_error(&self.conn, item_id, "you cancelled this transfer");
         if let Some(entry) = ferry_store::outbox::get_for_item(&self.conn, item_id)
             .map_err(|e| StoreError(e.to_string()))?
         {
@@ -589,6 +650,7 @@ impl Store for SqliteStore {
         }
         ferry_store::outbound::set_state(&self.conn, item_id, TransferState::Queued)
             .map_err(|e| StoreError(e.to_string()))?;
+        let _ = ferry_store::outbound::set_last_error(&self.conn, item_id, "");
         let _ = ferry_store::audit::append(&self.conn, "local", "outbox.retry", Some(item_id), "ok");
         Ok(())
     }
@@ -1214,8 +1276,16 @@ mod tests {
             .find(|e| e.kind == "item.outbox_expired")
             .expect("the drop must leave a real, durable audit_events row");
         assert_eq!(drop_event.item_id.as_deref(), Some(item_id.as_str()));
-        assert_eq!(drop_event.outcome, "dropped");
+        assert_eq!(drop_event.outcome, "outbox_ttl");
         assert_eq!(drop_event.actor, "local");
+
+        let sent = store.list_sent_items().unwrap();
+        let row = sent.iter().find(|s| s.item_id == item_id).unwrap();
+        assert_eq!(
+            row.last_error.as_deref(),
+            Some("the peer did not reappear before the outbox TTL expired"),
+            "the sender must see why the item was dropped"
+        );
     }
 
     #[test]
@@ -1294,10 +1364,12 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn interrupted_burn_leaves_unopenable_ciphertext_not_an_openable_orphan() {
+    fn a_real_fault_during_burn_leaves_unopenable_ciphertext_and_never_records_opened() {
         use ferry_core::ports::Store;
         use ferry_core::transfer::{receive_item, send_item};
+        use std::os::unix::fs::PermissionsExt;
 
         let payload = b"a secret that must not survive an interrupted burn".to_vec();
         let mut hasher = Sha256::new();
@@ -1335,16 +1407,36 @@ mod tests {
 
         assert!(receiver_store.read_inbound_plaintext(&item_id).is_ok());
 
-        ferry_store::inbox::clear_wrapped_dek(&receiver_store.conn, &item_id).unwrap();
+        let dir = receiver_store.payload_dir.clone();
+        let locked = std::fs::Permissions::from_mode(0o500);
+        let unlocked = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(&dir, locked).unwrap();
+        let burn_result = receiver_store.mark_inbound_opened(&item_id);
+        std::fs::set_permissions(&dir, unlocked).unwrap();
+
         assert!(
-            ferry_store::payload::len(&receiver_store.payload_dir, &item_id).unwrap() > 0,
-            "the ciphertext must still be sitting on disk at this point"
+            burn_result.is_err(),
+            "a filesystem fault mid-burn must surface as an error, not be swallowed"
         );
 
-        let result = receiver_store.read_inbound_plaintext(&item_id);
+        let inbound = ferry_store::inbox::get(&receiver_store.conn, &item_id).unwrap().unwrap();
         assert!(
-            result.is_err(),
+            inbound.wrapped_dek.is_none(),
+            "the wrapped key must be cleared before the ciphertext delete is attempted"
+        );
+        assert_ne!(
+            inbound.state,
+            TransferState::Opened,
+            "an interrupted burn must never record the item as cleanly Opened"
+        );
+        assert!(
+            receiver_store.read_inbound_plaintext(&item_id).is_err(),
             "leftover ciphertext without its key must be unopenable, never an openable orphan"
+        );
+        let audit = ferry_store::audit::list(&receiver_store.conn).unwrap();
+        assert!(
+            !audit.iter().any(|e| e.kind == "item.opened" && e.item_id.as_deref() == Some(item_id.as_str())),
+            "no item.opened row may be written when the burn did not complete"
         );
     }
 
@@ -1466,5 +1558,96 @@ mod tests {
             audit.iter().any(|e| e.kind == "peer.paired" && e.item_id.as_deref() == Some("aabbccdd")),
             "a completed pairing must leave a peer.paired audit row"
         );
+    }
+
+    #[test]
+    fn interrupted_burn_on_the_real_store_leaves_unopenable_ciphertext_not_an_openable_orphan() {
+        use ferry_core::ports::Store;
+        use ferry_core::transfer::{receive_item, send_item};
+
+        let payload: Vec<u8> = (0..40_000u32).map(|n| (n % 251) as u8).collect();
+        let mut hasher = Sha256::new();
+        hasher.update(&payload);
+        let expected_hash = hex::encode(hasher.finalize());
+
+        let sender_conn = ferry_store::connection::open_in_memory().unwrap();
+        ferry_store::roster::insert_peer(&sender_conn, "peer-b", "laptop", "sk", "xk").unwrap();
+        let mut sender_store =
+            SqliteStore::new(sender_conn, temp_payload_dir(), ferry_crypto::identity::Identity::generate());
+
+        let receiver_conn = ferry_store::connection::open_in_memory().unwrap();
+        ferry_store::roster::insert_peer(&receiver_conn, "peer-a", "laptop", "sk", "xk").unwrap();
+        let mut receiver_store =
+            SqliteStore::new(receiver_conn, temp_payload_dir(), ferry_crypto::identity::Identity::generate());
+
+        let mut item = sample_item("peer-b");
+        item.kind = ItemKind::Secret;
+        item.hash = expected_hash.clone();
+        item.size_bytes = payload.len() as u64;
+        item.is_burn_after_read = true;
+
+        let clock = ferry_core::expiry::ExpiryClock::new();
+        let item_id = enqueue_send(&mut sender_store, &clock, &item, "local").unwrap();
+
+        let (mut sender_channel, mut receiver_channel) = paired_channels("peer-a", "peer-b");
+        let sender_payload = payload.clone();
+        let sender_item_id = item_id.clone();
+        let sender_thread = std::thread::spawn(move || {
+            send_item(&mut sender_channel, &mut sender_store, &sender_item_id, &item, Cursor::new(sender_payload)).unwrap();
+        });
+        receive_item(&mut receiver_channel, &mut receiver_store, &clock, "peer-a", "local").unwrap();
+        sender_thread.join().unwrap();
+
+        assert_eq!(
+            receiver_store.read_inbound_plaintext(&item_id).unwrap(),
+            payload,
+            "sanity: the sealed item is readable before any burn step runs"
+        );
+
+        ferry_store::inbox::clear_wrapped_dek(&receiver_store.conn, &item_id).unwrap();
+
+        assert!(
+            ferry_store::payload::len(&receiver_store.payload_dir, &item_id).unwrap() > 0,
+            "the interrupted burn stopped before the ciphertext was deleted — it is still on disk"
+        );
+        assert!(
+            receiver_store.read_inbound_plaintext(&item_id).is_err(),
+            "with the wrapped key gone the ciphertext is undecryptable — an interrupted burn must never leave an openable orphan"
+        );
+        assert_eq!(
+            receiver_store.get_inbound_state(&item_id).unwrap(),
+            Some(TransferState::Delivered),
+            "set_opened never ran, so check_openable would still permit an open attempt — which then fails on the missing key, never returns plaintext"
+        );
+    }
+
+    #[test]
+    fn audit_rows_survive_a_daemon_restart() {
+        use ferry_core::ports::{NewRosterPeer, Store};
+
+        let db_path = std::env::temp_dir().join(format!("ferry-audit-restart-{}.sqlite", uuid::Uuid::now_v7()));
+
+        {
+            let conn = ferry_store::connection::open(&db_path).unwrap();
+            let mut store = SqliteStore::new(conn, temp_payload_dir(), ferry_crypto::identity::Identity::generate());
+            store
+                .add_paired_peer(&NewRosterPeer {
+                    peer_id: "cafef00d".into(),
+                    display_name: "workstation".into(),
+                    signing_key_hex: hex::encode([9u8; 32]),
+                    sealing_key: "age1stub".into(),
+                })
+                .unwrap();
+        }
+
+        let conn = ferry_store::connection::open(&db_path).unwrap();
+        let store = SqliteStore::new(conn, temp_payload_dir(), ferry_crypto::identity::Identity::generate());
+        let audit = store.list_audit(50, None).unwrap();
+        assert!(
+            audit.iter().any(|e| e.kind == "peer.paired" && e.item_id.as_deref() == Some("cafef00d")),
+            "an audit row written before a restart must still be there after reopening the same store file"
+        );
+
+        let _ = std::fs::remove_file(&db_path);
     }
 }

@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::event_bus::EventBus;
 use crate::pairing::PairingRegistry;
+use crate::provider::ProviderRegistry;
 
 #[derive(Debug, Error)]
 pub enum IpcServerError {
@@ -46,11 +47,12 @@ pub fn serve(
     runtime: &RuntimeStatus,
     event_bus: &EventBus,
     pairing: &PairingRegistry,
+    provider: &ProviderRegistry,
     source: &mut impl ferry_core::ports::OutboundSource,
 ) -> Result<(), IpcServerError> {
     loop {
         let stream = local_ipc::accept(listener).map_err(IpcServerError::Accept)?;
-        if handle_connection(stream, store, clock, source, runtime, event_bus, pairing) {
+        if handle_connection(stream, store, clock, source, runtime, event_bus, pairing, provider) {
             return Ok(());
         }
     }
@@ -77,6 +79,7 @@ fn handle_connection(
     runtime: &RuntimeStatus,
     event_bus: &EventBus,
     pairing: &PairingRegistry,
+    provider: &ProviderRegistry,
 ) -> bool {
     let frame = match ipc_read_frame(&mut stream) {
         Ok(frame) => frame,
@@ -102,6 +105,16 @@ fn handle_connection(
     if is_pairing_request(&envelope.request) {
         let response = handle_pairing(&envelope.request_id, envelope.request.clone(), pairing, store, event_bus);
         write_response(&mut stream, &response);
+        return false;
+    }
+
+    if is_provider_request(&envelope.request) {
+        let request = envelope.request.clone();
+        let response = handle_provider(&envelope.request_id, envelope.request, provider, store);
+        write_response(&mut stream, &response);
+        if let Some(event) = provider_event_for(&request, &response) {
+            event_bus.emit(event);
+        }
         return false;
     }
 
@@ -134,6 +147,149 @@ fn write_response(stream: &mut Stream, response: &IpcResponse) {
             }
         }
         Err(err) => eprintln!("ferry-daemon: failed to encode IPC response: {err}"),
+    }
+}
+
+fn is_provider_request(request: &IpcRequest) -> bool {
+    matches!(
+        request,
+        IpcRequest::ProviderStatus
+            | IpcRequest::ProviderConnect { .. }
+            | IpcRequest::ProviderConnectPoll
+            | IpcRequest::ProviderDisconnect
+            | IpcRequest::GistPublish { .. }
+            | IpcRequest::RosterFetch { .. }
+            | IpcRequest::RosterApplyRemote { .. }
+            | IpcRequest::RemoteJobStatus { .. }
+    )
+}
+
+fn provider_event_for(request: &IpcRequest, response: &IpcResponse) -> Option<IpcEvent> {
+    if !matches!(response.outcome, IpcOutcome::Ok { .. }) {
+        return None;
+    }
+    match request {
+        IpcRequest::ProviderConnect { .. }
+        | IpcRequest::ProviderConnectPoll
+        | IpcRequest::ProviderDisconnect => Some(IpcEvent::Changed {
+            resource: IpcResource::Provider,
+            id: None,
+        }),
+        _ => None,
+    }
+}
+
+fn provider_err(request_id: &RequestId, code: ErrorCode, message: String) -> IpcResponse {
+    IpcResponse {
+        request_id: request_id.clone(),
+        outcome: IpcOutcome::Err {
+            error: FerryError { code, message },
+        },
+    }
+}
+
+fn handle_provider(
+    request_id: &RequestId,
+    request: IpcRequest,
+    provider: &ProviderRegistry,
+    store: &mut impl Store,
+) -> IpcResponse {
+    use crate::provider::{ConnectOutcome, ProviderError};
+
+    let map_err = |e: ProviderError| {
+        let code = match e {
+            ProviderError::Disabled => ErrorCode::ItemRejectedByPolicy,
+            _ => ErrorCode::Internal,
+        };
+        provider_err(request_id, code, e.to_string())
+    };
+
+    match request {
+        IpcRequest::ProviderStatus => ok(request_id, IpcResult::ProviderStatus(provider.status())),
+        IpcRequest::ProviderConnect { pat } => match provider.connect(pat) {
+            Ok(ConnectOutcome::Connected(view)) => {
+                let _ = store.record_provider_event("provider.connected", "github");
+                ok(request_id, IpcResult::ProviderStatus(view))
+            }
+            Ok(ConnectOutcome::AwaitingDeviceAuth(view)) => ok(request_id, IpcResult::ProviderAuth(view)),
+            Err(e) => map_err(e),
+        },
+        IpcRequest::ProviderConnectPoll => match provider.connect_poll() {
+            Ok(Some(view)) => {
+                let _ = store.record_provider_event("provider.connected", "github");
+                ok(request_id, IpcResult::ProviderStatus(view))
+            }
+            Ok(None) => ok(request_id, IpcResult::ProviderAuthPending),
+            Err(e) => map_err(e),
+        },
+        IpcRequest::ProviderDisconnect => match provider.disconnect() {
+            Ok(()) => {
+                let _ = store.record_provider_event("provider.disconnected", "github");
+                ok(request_id, IpcResult::Ack)
+            }
+            Err(e) => map_err(e),
+        },
+        IpcRequest::GistPublish { item_id } => {
+            if !provider.is_enabled() {
+                return map_err(ProviderError::Disabled);
+            }
+            let params = format!("{{\"item_id\":{}}}", serde_json::Value::String(item_id));
+            match store.enqueue_remote_job("gist_publish", &params) {
+                Ok(job_id) => ok(request_id, IpcResult::RemoteJob(ferry_proto::ipc::RemoteJobView { job_id })),
+                Err(e) => provider_err(request_id, ErrorCode::Internal, e.to_string()),
+            }
+        }
+        IpcRequest::RosterFetch { locator } => match provider.fetch_roster_preview(store, &locator) {
+            Ok(view) => {
+                let _ = store.record_provider_event("roster.fetched", "previewed");
+                ok(request_id, IpcResult::RosterFetchPreview(view))
+            }
+            Err(e) => map_err(e),
+        },
+        IpcRequest::RosterApplyRemote { locator } => {
+            if !provider.is_enabled() {
+                return map_err(ProviderError::Disabled);
+            }
+            let params = format!("{{\"locator\":{}}}", serde_json::Value::String(locator));
+            match store.enqueue_remote_job("roster_apply", &params) {
+                Ok(job_id) => ok(request_id, IpcResult::RemoteJob(ferry_proto::ipc::RemoteJobView { job_id })),
+                Err(e) => provider_err(request_id, ErrorCode::Internal, e.to_string()),
+            }
+        }
+        IpcRequest::RemoteJobStatus { job_id } => match store.get_remote_job(&job_id) {
+            Ok(Some(row)) => {
+                let (result_url, result_summary) = match (row.kind.as_str(), row.result.as_deref()) {
+                    ("gist_publish", Some(r)) => (
+                        serde_json::from_str::<serde_json::Value>(r)
+                            .ok()
+                            .and_then(|v| v.get("url").and_then(|u| u.as_str().map(String::from))),
+                        None,
+                    ),
+                    ("roster_apply", Some(r)) => (
+                        None,
+                        serde_json::from_str::<serde_json::Value>(r).ok().and_then(|v| {
+                            let added = v.get("added")?.as_u64()?;
+                            let total = v.get("peer_count")?.as_u64()?;
+                            Some(format!("imported {added} of {total} peer(s)"))
+                        }),
+                    ),
+                    _ => (None, None),
+                };
+                ok(
+                    request_id,
+                    IpcResult::RemoteJobStatus(ferry_proto::ipc::RemoteJobStatusView {
+                        job_id: row.job_id,
+                        phase: row.phase,
+                        result_url,
+                        result_summary,
+                        error: row.error,
+                    }),
+                )
+            }
+            Ok(None) => provider_err(request_id, ErrorCode::ItemNotFound, "no such remote job".into()),
+            Err(e) => provider_err(request_id, ErrorCode::Internal, e.to_string()),
+        },
+        _ => provider_err(request_id, ErrorCode::Internal, "not a provider request".into()),
     }
 }
 
@@ -323,7 +479,7 @@ mod tests {
         fn get_outbox_expiry(&self, _item_id: &str) -> Result<Option<ferry_core::expiry::ExpiryDeadline>, StoreError> {
             unimplemented!()
         }
-        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str) -> Result<(), StoreError> {
+        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str, _cause: &str) -> Result<(), StoreError> {
             unimplemented!()
         }
         fn read_inbound_plaintext(&self, _item_id: &str) -> Result<Vec<u8>, StoreError> {
@@ -386,7 +542,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
         let response = send_request(&socket_path, IpcRequest::Status, IPC_PROTOCOL_VERSION);
@@ -409,7 +565,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
         let response = send_request(&socket_path, IpcRequest::Status, IPC_PROTOCOL_VERSION + 1);
@@ -438,7 +594,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
         let mut stream = local_ipc::connect(&socket_path).unwrap();
@@ -476,7 +632,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, store_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
             store
         });
 
@@ -554,7 +710,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, store_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &bus_for_server, &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &bus_for_server, &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
         let mut sub = local_ipc::connect(&socket_path).unwrap();
@@ -633,7 +789,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, payload_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
         });
 
         let list_response = send_request(&socket_path, IpcRequest::InboxList, IPC_PROTOCOL_VERSION);

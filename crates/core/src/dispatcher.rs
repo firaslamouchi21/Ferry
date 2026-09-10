@@ -87,7 +87,11 @@ pub fn drain_outbox_for_peer_reporting(
             if clock.is_expired(&deadline) {
                 store.remove_outbox_entry(&entry.outbox_id)?;
                 drop_expired_outbound(store, &entry.item_id)?;
-                store.record_outbound_dropped(&entry.item_id, actor)?;
+                store.set_outbound_last_error(
+                    &entry.item_id,
+                    "the peer did not reappear before the outbox TTL expired",
+                )?;
+                store.record_outbound_dropped(&entry.item_id, actor, "outbox_ttl")?;
                 store.discard_staged_source(&entry.item_id)?;
                 outcome.dropped.push(entry.item_id);
                 continue;
@@ -120,13 +124,18 @@ pub fn drain_outbox_for_peer_reporting(
                 store.discard_staged_source(&entry.item_id)?;
                 outcome.delivered.push(entry.item_id);
             }
-            Err(TransferError::DeclinedByReceiver(_)) => {
+            Err(TransferError::DeclinedByReceiver(reason)) => {
                 store.remove_outbox_entry(&entry.outbox_id)?;
-                store.record_outbound_dropped(&entry.item_id, actor)?;
+                store.set_outbound_last_error(
+                    &entry.item_id,
+                    &format!("the receiver declined the transfer: {reason}"),
+                )?;
+                store.record_outbound_dropped(&entry.item_id, actor, "declined")?;
                 store.discard_staged_source(&entry.item_id)?;
                 outcome.dropped.push(entry.item_id);
             }
             Err(err) => {
+                store.set_outbound_last_error(&entry.item_id, &err.to_string())?;
                 outcome.failed.push((entry.item_id, err));
             }
         }
@@ -221,7 +230,15 @@ mod tests {
         outbox: Vec<crate::ports::OutboxItem>,
         attempts: HashMap<String, u32>,
         dropped_notices: Vec<(String, String)>,
+        drop_causes: Vec<(String, String)>,
+        last_errors: HashMap<String, String>,
         open_receipts: HashMap<String, Vec<String>>,
+    }
+
+    impl FakeStore {
+        fn last_error_for(&self, item_id: &str) -> Option<String> {
+            self.last_errors.get(item_id).cloned()
+        }
     }
 
     impl FakeStore {
@@ -371,8 +388,14 @@ mod tests {
             Ok(self.outbox_expiry.get(item_id).cloned())
         }
 
-        fn record_outbound_dropped(&mut self, item_id: &str, actor: &str) -> Result<(), StoreError> {
+        fn record_outbound_dropped(&mut self, item_id: &str, actor: &str, cause: &str) -> Result<(), StoreError> {
             self.dropped_notices.push((item_id.to_string(), actor.to_string()));
+            self.drop_causes.push((item_id.to_string(), cause.to_string()));
+            Ok(())
+        }
+
+        fn set_outbound_last_error(&mut self, item_id: &str, reason: &str) -> Result<(), StoreError> {
+            self.last_errors.insert(item_id.to_string(), reason.to_string());
             Ok(())
         }
 
@@ -616,6 +639,16 @@ mod tests {
             store.dropped_notices,
             vec![("item-1".to_string(), "local".to_string())],
             "a drop must record a durable, visible notice — not just vanish silently"
+        );
+        assert_eq!(
+            store.drop_causes,
+            vec![("item-1".to_string(), "outbox_ttl".to_string())],
+            "an outbox-TTL drop must be distinguishable from an abort or a decline"
+        );
+        assert_eq!(
+            store.last_error_for("item-1").as_deref(),
+            Some("the peer did not reappear before the outbox TTL expired"),
+            "the sender must see a human-readable reason for the drop"
         );
     }
 

@@ -119,6 +119,11 @@ for _ in $(seq 1 "$RECV_TIMEOUT"); do
 done
 
 if [ -z "$item" ]; then
+  if [ "${FERRY_STRICT:-0}" = 1 ]; then
+    echo "--- a daemon log (tail) ---"; tail -20 "$ROOT/a/daemon.log"
+    echo "--- b daemon log (tail) ---"; tail -20 "$ROOT/b/daemon.log"
+    fail "b did not receive the item within ${RECV_TIMEOUT}s and FERRY_STRICT=1"
+  fi
   echo
   echo "WARN: b did not receive the item within ${RECV_TIMEOUT}s."
   echo "      Boot + isolated identities + pairing + signed roster + send-queue all passed."

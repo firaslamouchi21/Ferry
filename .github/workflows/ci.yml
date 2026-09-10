@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main,sandbox]
   pull_request:
 
 concurrency:
@@ -48,6 +48,11 @@ jobs:
         run: |
           cargo test --package ferry-proto --locked
           git diff --exit-code -- bindings/
+          if [ -n "$(git ls-files --others --exclude-standard -- bindings/)" ]; then
+            echo "untracked generated binding files — run 'cargo test -p ferry-proto' then 'git add bindings/'"
+            git status --porcelain -- bindings/
+            exit 1
+          fi
 
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
@@ -74,6 +79,12 @@ jobs:
       - run: pnpm --filter @ferry/ui build
       - name: Build + package the VS Code extension (.vsix)
         run: pnpm --filter ferry-vscode package
+      - name: Extension activation smoke — activate() registers every command + the tree view without throwing
+        run: pnpm --filter ferry-vscode run test:activation
+      - name: Install xvfb for the extension-host test
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Extension host test — real VS Code activates the extension, opens the webview, runs commands
+        run: xvfb-run -a pnpm --filter ferry-vscode run test:e2e
       - uses: actions/upload-artifact@v4
         with:
           name: ferry-vsix-dev
@@ -92,6 +103,17 @@ jobs:
         run: cargo build --workspace --locked
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
+      - name: Keychain smoke — the OS-native store actually round-trips a secret
+        run: |
+          security create-keychain -p ci-pass ferry-ci.keychain
+          security list-keychains -d user -s ferry-ci.keychain "$(security default-keychain -d user | tr -d ' "')"
+          security default-keychain -s ferry-ci.keychain
+          security unlock-keychain -p ci-pass ferry-ci.keychain
+          security set-keychain-settings ferry-ci.keychain
+          cargo test -p ferry-crypto --locked -- --ignored --exact secret_store::tests::keychain_backend_smoke_generate_read_clear
+      - name: Tear down the throwaway keychain
+        if: always()
+        run: security delete-keychain ferry-ci.keychain || true
 
   windows:
     name: Build & test (windows)
@@ -105,6 +127,8 @@ jobs:
         run: cargo build --workspace --locked
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
+      - name: Keychain smoke — the Windows credential store actually round-trips a secret
+        run: cargo test -p ferry-crypto --locked -- --ignored --exact secret_store::tests::keychain_backend_smoke_generate_read_clear
 
   desktop:
     name: Tauri shell compiles (${{ matrix.os }})
@@ -112,7 +136,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
@@ -137,6 +161,9 @@ jobs:
       - name: cargo check the Tauri crate (its own workspace, so the root build never sees it)
         working-directory: desktop/src-tauri
         run: cargo check --locked
+      - name: cargo test the Tauri crate (framing + socket-path + daemon-resolution)
+        working-directory: desktop/src-tauri
+        run: cargo test --locked
 
   docker-two-peer:
     name: Two-peer end-to-end scenario (docker)
@@ -162,3 +189,13 @@ jobs:
         run: cargo build -p ferry-daemon -p ferry-cli --locked
       - name: Run two real daemons with isolated keychains through pair + send + open
         run: bash testing/local-two-peer.sh
+      - name: Invariant suite — roster enforcement, burn, TTL-from-delivery, offline drain, content-free audit
+        run: bash testing/verify-invariants.sh
+
+  two-peer-strict:
+    name: Two-peer full invariant suite over real multicast (hard failure)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pair + transfer + burn + TTL + messaging + content-free audit, across two real containers
+        run: FERRY_COMPOSE=docker-compose.macvlan.yml FERRY_STRICT=1 FERRY_MCAST_BRIDGE=ferrymcast0 bash testing/scenario.sh

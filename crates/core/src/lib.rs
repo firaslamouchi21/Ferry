@@ -9,6 +9,7 @@ pub mod outbox;
 pub mod pairing;
 pub mod secrets;
 pub mod policy;
+pub mod remote;
 pub mod ports;
 pub mod state;
 pub mod transfer;

@@ -15,6 +15,7 @@ base64 = "0.22"
 ferry-proto = { path = "../proto" }
 ferry-core = { path = "../core" }
 ferry-crypto = { path = "../crypto" }
+ferry-remote = { path = "../remote" }
 ferry-net = { path = "../net" }
 ferry-store = { path = "../store" }
 serde = "1.0.229"

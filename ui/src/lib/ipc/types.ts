@@ -15,6 +15,15 @@ export type { RosterImportSummaryView } from "@bindings/RosterImportSummaryView"
 export type { InboxItemView } from "@bindings/InboxItemView";
 export type { SentItemView } from "@bindings/SentItemView";
 export type { AuditEventView } from "@bindings/AuditEventView";
+export type { MessageView } from "@bindings/MessageView";
+export type { MessageThreadView } from "@bindings/MessageThreadView";
+export type { ProviderStatusView } from "@bindings/ProviderStatusView";
+export type { ProviderAuthView } from "@bindings/ProviderAuthView";
+export type { GistPublishedView } from "@bindings/GistPublishedView";
+export type { RosterFetchPreviewView } from "@bindings/RosterFetchPreviewView";
+export type { RosterPreviewEntryView } from "@bindings/RosterPreviewEntryView";
+export type { RemoteJobView } from "@bindings/RemoteJobView";
+export type { RemoteJobStatusView } from "@bindings/RemoteJobStatusView";
 export type { SealedImportView } from "@bindings/SealedImportView";
 export type { PairMode } from "@bindings/PairMode";
 export type { PairPhase } from "@bindings/PairPhase";

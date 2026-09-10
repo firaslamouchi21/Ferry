@@ -1,5 +1,9 @@
 import "@testing-library/react";
 
+if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {};
+}
+
 class MemoryStorage implements Storage {
   private m = new Map<string, string>();
   get length(): number {

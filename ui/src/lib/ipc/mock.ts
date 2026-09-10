@@ -1,5 +1,14 @@
 import type { ConnectionPhase, Transport } from "./transport";
-import type { InboxItemView, IpcEnvelope, IpcEvent, IpcResponse, IpcResult, SentItemView } from "./types";
+import type {
+  InboxItemView,
+  IpcEnvelope,
+  IpcEvent,
+  IpcResponse,
+  IpcResult,
+  MessageView,
+  SentItemView,
+} from "./types";
+import { decodeBase64 } from "@/lib/format";
 
 const b = (n: number) => n as unknown as bigint;
 
@@ -202,6 +211,28 @@ export class MockTransport implements Transport {
   private inbox = seedInbox();
   private sent = seedSent();
   private audit = seedAudit();
+  private messages: MessageView[] = [
+    {
+      item_id: "MSG_1",
+      peer_id: seedPeers()[0].peer_id,
+      outbound: false,
+      body: "hey, did the build artifact come through?",
+      state: "delivered" as const,
+      at_millis: b(Date.now() - 600_000),
+    },
+    {
+      item_id: "MSG_2",
+      peer_id: seedPeers()[0].peer_id,
+      outbound: true,
+      body: "yep, opening it now",
+      state: "delivered" as const,
+      at_millis: b(Date.now() - 540_000),
+    },
+  ];
+  private providerEnabled = true;
+  private providerConnected = false;
+  private providerPollsLeft = 0;
+  private remoteJobs = new Map<string, { kind: "gist_publish" | "roster_apply"; polls: number }>();
   private pairings = new Map<
     string,
     { phase: "awaiting_peer" | "awaiting_confirmation" | "done" | "failed"; ticks: number; accepted?: boolean }
@@ -234,6 +265,14 @@ export class MockTransport implements Transport {
     }
     this.started = false;
   }
+
+  retryNow() {}
+
+  canStartDaemon() {
+    return false;
+  }
+
+  async startDaemon() {}
 
   emit(event: IpcEvent) {
     for (const listener of this.eventListeners) listener(event);
@@ -293,7 +332,19 @@ export class MockTransport implements Transport {
       case "send":
       case "send_inline": {
         const itemId = `OT_${Math.floor(Math.random() * 9000 + 3000)}`;
-        this.emit({ event: "changed", params: { resource: "transfer", id: itemId } });
+        if (request.method === "send_inline" && request.params.kind === "message") {
+          this.messages.push({
+            item_id: itemId,
+            peer_id: request.params.peer_id,
+            outbound: true,
+            body: decodeBase64(request.params.content_base64),
+            state: "queued" as const,
+            at_millis: b(Date.now()),
+          });
+          this.emit({ event: "changed", params: { resource: "message", id: itemId } });
+        } else {
+          this.emit({ event: "changed", params: { resource: "transfer", id: itemId } });
+        }
         return ok({ result: "send", value: { item_id: itemId } })(id);
       }
       case "sent_list":
@@ -308,6 +359,27 @@ export class MockTransport implements Transport {
         return ok({ result: "ack" })(id);
       case "audit_list":
         return ok({ result: "audit_list", value: this.audit })(id);
+      case "message_threads":
+        return ok({
+          result: "message_threads",
+          value: this.messages.length
+            ? [
+                {
+                  peer_id: this.peers[0].peer_id,
+                  display_name: this.peers[0].display_name,
+                  reachable: this.peers[0].reachable,
+                  last_body: this.messages[this.messages.length - 1].body,
+                  last_at_millis: this.messages[this.messages.length - 1].at_millis,
+                  count: this.messages.length,
+                },
+              ]
+            : [],
+        })(id);
+      case "message_thread":
+        return ok({
+          result: "message_thread",
+          value: this.messages.filter((m) => m.peer_id === request.params.peer_id),
+        })(id);
       case "pair_complete":
         return ok({ result: "ack" })(id);
       case "pair_begin": {
@@ -372,6 +444,107 @@ export class MockTransport implements Transport {
         })(id);
       case "quit":
         return ok({ result: "ack" })(id);
+      case "provider_status":
+        return ok({
+          result: "provider_status",
+          value: {
+            provider: "github",
+            enabled: this.providerEnabled,
+            connected: this.providerConnected,
+            login: this.providerConnected ? "octocat" : null,
+          },
+        })(id);
+      case "provider_connect": {
+        if (!this.providerEnabled) {
+          return {
+            request_id: id,
+            outcome: { outcome: "err", error: { code: "item_rejected_by_policy", message: "remote provider features are turned off" } },
+          };
+        }
+        if (request.params.pat) {
+          this.providerConnected = true;
+          this.emit({ event: "changed", params: { resource: "provider", id: null } });
+          return ok({
+            result: "provider_status",
+            value: { provider: "github", enabled: true, connected: true, login: "octocat" },
+          })(id);
+        }
+        this.providerPollsLeft = 2;
+        return ok({
+          result: "provider_auth",
+          value: { user_code: "WDJB-MJHT", verification_uri: "https://github.com/login/device", interval_secs: 1, expires_in_secs: 900 },
+        })(id);
+      }
+      case "provider_connect_poll": {
+        if (this.providerPollsLeft > 0) {
+          this.providerPollsLeft -= 1;
+          return ok({ result: "provider_auth_pending" })(id);
+        }
+        this.providerConnected = true;
+        this.emit({ event: "changed", params: { resource: "provider", id: null } });
+        return ok({
+          result: "provider_status",
+          value: { provider: "github", enabled: true, connected: true, login: "octocat" },
+        })(id);
+      }
+      case "provider_disconnect":
+        this.providerConnected = false;
+        this.emit({ event: "changed", params: { resource: "provider", id: null } });
+        return ok({ result: "ack" })(id);
+      case "gist_publish": {
+        const jobId = `JOB_${Math.random().toString(36).slice(2, 8)}`;
+        this.remoteJobs.set(jobId, { kind: "gist_publish", polls: 1 });
+        return ok({ result: "remote_job", value: { job_id: jobId } })(id);
+      }
+      case "remote_job_status": {
+        const job = this.remoteJobs.get(request.params.job_id);
+        if (!job) {
+          return {
+            request_id: id,
+            outcome: { outcome: "err", error: { code: "item_not_found", message: "no such remote job" } },
+          };
+        }
+        if (job.polls > 0) {
+          job.polls -= 1;
+          return ok({
+            result: "remote_job_status",
+            value: { job_id: request.params.job_id, phase: "running", result_url: null, result_summary: null, error: null },
+          })(id);
+        }
+        if (job.kind === "roster_apply") {
+          this.emit({ event: "changed", params: { resource: "roster", id: null } });
+        }
+        return ok({
+          result: "remote_job_status",
+          value: {
+            job_id: request.params.job_id,
+            phase: "done",
+            result_url: job.kind === "gist_publish" ? "https://gist.github.com/octocat/deadbeef" : null,
+            result_summary: job.kind === "roster_apply" ? "imported 2 of 3 peer(s)" : null,
+            error: null,
+          },
+        })(id);
+      }
+      case "roster_fetch":
+        return ok({
+          result: "roster_fetch_preview",
+          value: {
+            signer_verifying_key_hex: "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+            known_signer: false,
+            adds: 2,
+            already_present: 1,
+            entries: [
+              { peer_id: "PK_new_1", display_name: "ci-runner", already_present: false },
+              { peer_id: "PK_new_2", display_name: "design-mini", already_present: false },
+              { peer_id: this.peers[0].peer_id, display_name: this.peers[0].display_name, already_present: true },
+            ],
+          },
+        })(id);
+      case "roster_apply_remote": {
+        const jobId = `JOB_${Math.random().toString(36).slice(2, 8)}`;
+        this.remoteJobs.set(jobId, { kind: "roster_apply", polls: 1 });
+        return ok({ result: "remote_job", value: { job_id: jobId } })(id);
+      }
       default:
         return {
           request_id: id,

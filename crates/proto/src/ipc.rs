@@ -68,6 +68,16 @@ pub enum IpcRequest {
     SentRetry { item_id: String },
     AuditList { limit: u32, before_millis: Option<i64> },
     PeerRemove { peer_id: String },
+    MessageThreads,
+    MessageThread { peer_id: String },
+    ProviderStatus,
+    ProviderConnect { pat: Option<String> },
+    ProviderConnectPoll,
+    ProviderDisconnect,
+    GistPublish { item_id: String },
+    RosterFetch { locator: String },
+    RosterApplyRemote { locator: String },
+    RemoteJobStatus { job_id: String },
     Subscribe,
 }
 
@@ -122,6 +132,7 @@ pub enum IpcResource {
     Peer,
     Roster,
     Audit,
+    Provider,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -205,6 +216,87 @@ pub struct SealedImportView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[ts(export, export_to = "../../../bindings/")]
+pub struct MessageView {
+    pub item_id: String,
+    pub peer_id: String,
+    pub outbound: bool,
+    pub body: String,
+    pub state: TransferState,
+    pub at_millis: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct MessageThreadView {
+    pub peer_id: String,
+    pub display_name: String,
+    pub reachable: bool,
+    pub last_body: String,
+    pub last_at_millis: i64,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct ProviderStatusView {
+    pub provider: String,
+    pub connected: bool,
+    pub enabled: bool,
+    pub login: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct ProviderAuthView {
+    pub user_code: String,
+    pub verification_uri: String,
+    pub interval_secs: u32,
+    pub expires_in_secs: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct GistPublishedView {
+    pub url: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct RemoteJobView {
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct RemoteJobStatusView {
+    pub job_id: String,
+    pub phase: String,
+    pub result_url: Option<String>,
+    pub result_summary: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct RosterPreviewEntryView {
+    pub peer_id: String,
+    pub display_name: String,
+    pub already_present: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
+pub struct RosterFetchPreviewView {
+    pub signer_verifying_key_hex: String,
+    pub known_signer: bool,
+    pub adds: u32,
+    pub already_present: u32,
+    pub entries: Vec<RosterPreviewEntryView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../../bindings/")]
 pub struct IdentityView {
     pub fingerprint: String,
     pub signing_key_hex: String,
@@ -262,6 +354,15 @@ pub enum IpcResult {
     AuditList(Vec<AuditEventView>),
     PairBegin(PairBeginView),
     PairStatus(PairStatusView),
+    MessageThreads(Vec<MessageThreadView>),
+    MessageThread(Vec<MessageView>),
+    ProviderStatus(ProviderStatusView),
+    ProviderAuth(ProviderAuthView),
+    ProviderAuthPending,
+    GistPublished(GistPublishedView),
+    RosterFetchPreview(RosterFetchPreviewView),
+    RemoteJob(RemoteJobView),
+    RemoteJobStatus(RemoteJobStatusView),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

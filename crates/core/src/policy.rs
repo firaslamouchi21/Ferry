@@ -168,7 +168,7 @@ mod tests {
             unimplemented!("not needed for policy tests")
         }
 
-        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str) -> Result<(), StoreError> {
+        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str, _cause: &str) -> Result<(), StoreError> {
             unimplemented!("not needed for policy tests")
         }
 

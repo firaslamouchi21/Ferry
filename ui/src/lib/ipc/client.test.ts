@@ -59,4 +59,53 @@ describe("FerryClient over MockTransport", () => {
     expect(err).toBeInstanceOf(Error);
     expect(err.code).toBe("internal");
   });
+
+  it("connects a provider by PAT and reports it connected", async () => {
+    const client = new FerryClient("mock", new MockTransport());
+    const before = await client.providerStatus();
+    expect(before.connected).toBe(false);
+    const result = await client.providerConnect("ghp_faketoken");
+    expect("connected" in result && result.connected).toBe(true);
+    expect((await client.providerStatus()).connected).toBe(true);
+  });
+
+  it("walks the device-flow poll from pending to connected", async () => {
+    const client = new FerryClient("mock", new MockTransport());
+    const auth = await client.providerConnect(null);
+    expect("user_code" in auth).toBe(true);
+    let status = await client.providerConnectPoll();
+    expect(status).toBeNull();
+    while (status === null) status = await client.providerConnectPoll();
+    expect(status.connected).toBe(true);
+  });
+
+  it("fetches a roster preview with a signer and a diff", async () => {
+    const client = new FerryClient("mock", new MockTransport());
+    await client.providerConnect("ghp_faketoken");
+    const preview = await client.rosterFetch("acme/team/roster.json");
+    expect(preview.signer_verifying_key_hex).toBeTruthy();
+    expect(preview.adds).toBeGreaterThan(0);
+    expect(preview.entries.some((e) => e.already_present)).toBe(true);
+  });
+
+  it("publishes a gist as a job that finishes with a url", async () => {
+    const client = new FerryClient("mock", new MockTransport());
+    await client.providerConnect("ghp_faketoken");
+    const job = await client.gistPublish("IT_1");
+    expect(job.job_id).toBeTruthy();
+    let status = await client.remoteJobStatus(job.job_id);
+    expect(status.phase).toBe("running");
+    status = await client.remoteJobStatus(job.job_id);
+    expect(status.phase).toBe("done");
+    expect(status.result_url).toContain("gist.github.com");
+  });
+
+  it("applies a remote roster as a job that finishes with a summary", async () => {
+    const client = new FerryClient("mock", new MockTransport());
+    await client.providerConnect("ghp_faketoken");
+    const job = await client.rosterApplyRemote("acme/team/roster.json");
+    let status = await client.remoteJobStatus(job.job_id);
+    while (status.phase !== "done") status = await client.remoteJobStatus(job.job_id);
+    expect(status.result_summary).toMatch(/imported/);
+  });
 });

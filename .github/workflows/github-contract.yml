@@ -1,0 +1,29 @@
+name: GitHub provider contract
+
+# Runs the tests that hit the real GitHub API. Manual only, and a no-op unless
+# GITHUB_TEST_TOKEN is set (a PAT with the `gist` scope). See docs/GITHUB_APP_SETUP.md.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TEST_TOKEN: ${{ secrets.GITHUB_TEST_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Skip if no token is configured
+        if: env.GITHUB_TEST_TOKEN == ''
+        run: echo "GITHUB_TEST_TOKEN is not set — nothing to run. Add it as a repo secret to enable the real-API contract test."
+      - name: Run the real-API contract test
+        if: env.GITHUB_TEST_TOKEN != ''
+        run: cargo test -p ferry-remote --locked -- --ignored --exact github::tests::contract_real_github_verifies_a_token_and_publishes_then_deletes_a_gist --nocapture

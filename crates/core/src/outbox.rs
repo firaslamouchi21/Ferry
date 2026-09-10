@@ -210,7 +210,7 @@ mod tests {
             Ok(self.outbox_expiry.get(item_id).cloned())
         }
 
-        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str) -> Result<(), StoreError> {
+        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str, _cause: &str) -> Result<(), StoreError> {
             Ok(())
         }
 

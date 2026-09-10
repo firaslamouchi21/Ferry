@@ -32,6 +32,7 @@ pub struct OutboundItem {
     pub notify_on_open: bool,
     pub created_at_millis: i64,
     pub source_path: String,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -97,7 +98,7 @@ pub fn create_and_enqueue(
 
 pub fn get(conn: &Connection, id: &str) -> Result<Option<OutboundItem>, OutboundError> {
     conn.query_row(
-        "SELECT id, peer_id, kind, name, state, size_bytes, hash, ttl_secs, is_burn_after_read, notify_on_open, created_at_millis, source_path
+        "SELECT id, peer_id, kind, name, state, size_bytes, hash, ttl_secs, is_burn_after_read, notify_on_open, created_at_millis, source_path, last_error
          FROM outbound_items WHERE id = ?1",
         params![id],
         row_to_item,
@@ -109,7 +110,7 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<OutboundItem>, Outbound
 pub fn list_all(conn: &Connection) -> Result<Vec<OutboundItem>, OutboundError> {
     let rows: Vec<Result<OutboundItem, OutboundError>> = conn
         .prepare(
-            "SELECT id, peer_id, kind, name, state, size_bytes, hash, ttl_secs, is_burn_after_read, notify_on_open, created_at_millis, source_path
+            "SELECT id, peer_id, kind, name, state, size_bytes, hash, ttl_secs, is_burn_after_read, notify_on_open, created_at_millis, source_path, last_error
              FROM outbound_items ORDER BY created_at_millis DESC",
         )?
         .query_map([], row_to_item)?
@@ -151,7 +152,17 @@ fn row_to_item(row: &rusqlite::Row) -> rusqlite::Result<Result<OutboundItem, Out
         notify_on_open: row.get::<_, i64>(9)? != 0,
         created_at_millis: row.get(10)?,
         source_path: row.get(11)?,
+        last_error: row.get(12)?,
     }))
+}
+
+pub fn set_last_error(conn: &Connection, id: &str, reason: &str) -> Result<(), OutboundError> {
+    let stored: Option<&str> = if reason.is_empty() { None } else { Some(reason) };
+    conn.execute(
+        "UPDATE outbound_items SET last_error = ?2 WHERE id = ?1",
+        params![id, stored],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

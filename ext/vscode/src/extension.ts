@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import fs from "node:fs";
 import path from "node:path";
 import { DaemonBridge, defaultSocketPath } from "./daemon-bridge";
+import { daemonReachable, startDaemon, stopDaemon } from "./daemon-lifecycle";
 import { PeersTreeProvider } from "./tree";
 
 function socketPath(): string {
@@ -10,6 +11,27 @@ function socketPath(): string {
 }
 
 let panel: vscode.WebviewPanel | undefined;
+
+async function ensureDaemon(context: vscode.ExtensionContext, notifyWhenAlreadyUp: boolean): Promise<void> {
+  const sock = socketPath();
+  if (await daemonReachable(sock)) {
+    if (notifyWhenAlreadyUp) vscode.window.showInformationMessage("Ferry: the daemon is already running.");
+    return;
+  }
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Window, title: "Ferry: starting daemon…" },
+    async () => {
+      try {
+        await startDaemon(context, sock);
+        vscode.window.showInformationMessage("Ferry: daemon started.");
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `Ferry: could not start the daemon — ${String((err as Error).message ?? err)}. Run \`ferry daemon start\` in a terminal.`,
+        );
+      }
+    },
+  );
+}
 
 export function activate(context: vscode.ExtensionContext) {
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -21,11 +43,19 @@ export function activate(context: vscode.ExtensionContext) {
   const tree = new PeersTreeProvider(socketPath());
   context.subscriptions.push(vscode.window.registerTreeDataProvider("ferryPeers", tree));
 
+  void ensureDaemon(context, false).then(() => tree.refresh());
+
   context.subscriptions.push(
     vscode.commands.registerCommand("ferry.open", () => openPanel(context)),
     vscode.commands.registerCommand("ferry.pair", () => openPanel(context, "/pair")),
     vscode.commands.registerCommand("ferry.openInbox", () => openPanel(context, "/inbox")),
     vscode.commands.registerCommand("ferry.refreshPeers", () => tree.refresh()),
+    vscode.commands.registerCommand("ferry.startDaemon", () => ensureDaemon(context, true)),
+    vscode.commands.registerCommand("ferry.restartDaemon", async () => {
+      await stopDaemon(socketPath());
+      await ensureDaemon(context, false);
+      tree.refresh();
+    }),
     vscode.commands.registerCommand("ferry.sendFile", async (uri?: vscode.Uri) => {
       const target = uri ?? vscode.window.activeTextEditor?.document.uri;
       if (!target) {
@@ -57,7 +87,7 @@ function openPanel(context: vscode.ExtensionContext, route?: string) {
     localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media", "ui")],
   });
 
-  const bridge = new DaemonBridge(socketPath(), (message) => panel?.webview.postMessage(message));
+  const bridge = new DaemonBridge(socketPath(), (message) => panel?.webview.postMessage(message), context);
   panel.webview.onDidReceiveMessage((message) => bridge.handle(message));
   panel.webview.html = renderHtml(context, panel.webview);
 

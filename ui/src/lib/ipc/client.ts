@@ -12,6 +12,13 @@ import {
   type IpcRequest,
   type IpcResult,
   type ItemKind,
+  type RemoteJobStatusView,
+  type RemoteJobView,
+  type MessageThreadView,
+  type MessageView,
+  type ProviderAuthView,
+  type ProviderStatusView,
+  type RosterFetchPreviewView,
   type PairBeginView,
   type PairMode,
   type PairStatusView,
@@ -91,6 +98,15 @@ export class FerryClient {
   }
   stop() {
     this.transport.stop();
+  }
+  retryNow() {
+    this.transport.retryNow();
+  }
+  canStartDaemon(): boolean {
+    return this.transport.canStartDaemon();
+  }
+  startDaemon(): Promise<void> {
+    return this.transport.startDaemon();
   }
   phase(): ConnectionPhase {
     return this.transport.phase();
@@ -187,6 +203,59 @@ export class FerryClient {
 
   async sentRetry(itemId: string): Promise<void> {
     await this.call({ method: "sent_retry", params: { item_id: itemId } });
+  }
+
+  async messageThreads(): Promise<MessageThreadView[]> {
+    const r = await this.call({ method: "message_threads" });
+    return (r as Extract<IpcResult, { result: "message_threads" }>).value;
+  }
+
+  async messageThread(peerId: string): Promise<MessageView[]> {
+    const r = await this.call({ method: "message_thread", params: { peer_id: peerId } });
+    return (r as Extract<IpcResult, { result: "message_thread" }>).value;
+  }
+
+  async providerStatus(): Promise<ProviderStatusView> {
+    const r = await this.call({ method: "provider_status" });
+    return (r as Extract<IpcResult, { result: "provider_status" }>).value;
+  }
+
+  async providerConnect(pat: string | null): Promise<ProviderStatusView | ProviderAuthView> {
+    const r = await this.call({ method: "provider_connect", params: { pat } });
+    if ((r as IpcResult).result === "provider_auth") {
+      return (r as Extract<IpcResult, { result: "provider_auth" }>).value;
+    }
+    return (r as Extract<IpcResult, { result: "provider_status" }>).value;
+  }
+
+  async providerConnectPoll(): Promise<ProviderStatusView | null> {
+    const r = await this.call({ method: "provider_connect_poll" });
+    if ((r as IpcResult).result === "provider_auth_pending") return null;
+    return (r as Extract<IpcResult, { result: "provider_status" }>).value;
+  }
+
+  async providerDisconnect(): Promise<void> {
+    await this.call({ method: "provider_disconnect" });
+  }
+
+  async gistPublish(itemId: string): Promise<RemoteJobView> {
+    const r = await this.call({ method: "gist_publish", params: { item_id: itemId } });
+    return (r as Extract<IpcResult, { result: "remote_job" }>).value;
+  }
+
+  async rosterFetch(locator: string): Promise<RosterFetchPreviewView> {
+    const r = await this.call({ method: "roster_fetch", params: { locator } });
+    return (r as Extract<IpcResult, { result: "roster_fetch_preview" }>).value;
+  }
+
+  async rosterApplyRemote(locator: string): Promise<RemoteJobView> {
+    const r = await this.call({ method: "roster_apply_remote", params: { locator } });
+    return (r as Extract<IpcResult, { result: "remote_job" }>).value;
+  }
+
+  async remoteJobStatus(jobId: string): Promise<RemoteJobStatusView> {
+    const r = await this.call({ method: "remote_job_status", params: { job_id: jobId } });
+    return (r as Extract<IpcResult, { result: "remote_job_status" }>).value;
   }
 
   async auditList(limit: number, beforeMillis: number | null): Promise<AuditEventView[]> {
