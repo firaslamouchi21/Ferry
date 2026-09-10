@@ -143,9 +143,17 @@ pub trait Store {
 
     fn get_outbox_expiry(&self, item_id: &str) -> Result<Option<ExpiryDeadline>, StoreError>;
 
-    fn record_outbound_dropped(&mut self, item_id: &str, actor: &str) -> Result<(), StoreError>;
+    fn record_outbound_dropped(&mut self, item_id: &str, actor: &str, cause: &str) -> Result<(), StoreError>;
+
+    fn set_outbound_last_error(&mut self, _item_id: &str, _reason: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
 
     fn read_inbound_plaintext(&self, item_id: &str) -> Result<Vec<u8>, StoreError>;
+
+    fn read_outbound_content(&self, _item_id: &str) -> Result<Vec<u8>, StoreError> {
+        Err(StoreError("reading outbound content is not supported by this store".into()))
+    }
 
     fn is_healthy(&self) -> Result<bool, StoreError>;
 
@@ -158,6 +166,22 @@ pub trait Store {
     fn add_paired_peer(&mut self, peer: &NewRosterPeer) -> Result<(), StoreError>;
 
     fn list_inbox_items(&self) -> Result<Vec<InboxItemSummary>, StoreError>;
+
+    fn roster_signing_keys_hex(&self) -> Result<Vec<String>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    fn record_provider_event(&mut self, _kind: &str, _outcome: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn enqueue_remote_job(&mut self, _kind: &str, _params_json: &str) -> Result<String, StoreError> {
+        Err(StoreError("remote jobs are not supported by this store".into()))
+    }
+
+    fn get_remote_job(&self, _job_id: &str) -> Result<Option<RemoteJobRow>, StoreError> {
+        Ok(None)
+    }
 
     fn build_sealed_blob(&self, _item_id: &str) -> Result<Vec<u8>, StoreError> {
         Err(StoreError("sealed blob export is not supported by this store".into()))
@@ -220,4 +244,39 @@ pub trait Channel {
 pub trait OutboundSource {
     type Reader: std::io::Read + std::io::Seek;
     fn open(&mut self, item_id: &str) -> std::io::Result<Self::Reader>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("remote provider error: {0}")]
+pub struct RemoteError(pub String);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLocator {
+    pub provider: String,
+    pub host: Option<String>,
+    pub path: String,
+    pub reference: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedRef {
+    pub url: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteJobRow {
+    pub job_id: String,
+    pub kind: String,
+    pub phase: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+}
+
+pub trait RemoteFetch {
+    fn fetch(&self, locator: &RemoteLocator) -> Result<Vec<u8>, RemoteError>;
+}
+
+pub trait SnippetPublisher {
+    fn publish_private(&self, name: &str, bytes: &[u8]) -> Result<PublishedRef, RemoteError>;
 }

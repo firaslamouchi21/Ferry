@@ -61,6 +61,18 @@ pub fn append(dir: &Path, item_id: &str, bytes: &[u8]) -> Result<u64, PayloadErr
     Ok(len)
 }
 
+pub fn truncate_to(dir: &Path, item_id: &str, len: u64) -> Result<(), PayloadError> {
+    let path = path_for(dir, item_id)?;
+    match OpenOptions::new().write(true).open(&path) {
+        Ok(file) => file.set_len(len).map_err(|source| PayloadError::Io {
+            path: path.clone(),
+            source,
+        }),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(PayloadError::Io { path, source }),
+    }
+}
+
 pub fn len(dir: &Path, item_id: &str) -> Result<u64, PayloadError> {
     let path = path_for(dir, item_id)?;
     match fs::metadata(&path) {
@@ -165,6 +177,22 @@ mod tests {
 
         assert_eq!(read_all(&dir.0, "item-1").unwrap(), b"hello world");
         assert_eq!(len(&dir.0, "item-1").unwrap(), 11);
+    }
+
+    #[test]
+    fn truncate_to_rolls_back_a_partial_or_duplicated_tail_write() {
+        let dir = TempDir::new();
+        append(&dir.0, "item-1", b"hello world").unwrap();
+        truncate_to(&dir.0, "item-1", 5).unwrap();
+        assert_eq!(read_all(&dir.0, "item-1").unwrap(), b"hello");
+        append(&dir.0, "item-1", b" there").unwrap();
+        assert_eq!(read_all(&dir.0, "item-1").unwrap(), b"hello there");
+    }
+
+    #[test]
+    fn truncate_to_on_a_missing_payload_is_a_noop() {
+        let dir = TempDir::new();
+        truncate_to(&dir.0, "no-such-item", 0).unwrap();
     }
 
     #[test]

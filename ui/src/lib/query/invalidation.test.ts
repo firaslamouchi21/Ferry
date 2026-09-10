@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { FerryClient, MockTransport, type IpcEvent, type IpcResource } from "@/lib/ipc";
 import { queryKeys, resourceInvalidations } from "./keys";
 
-const ALL_RESOURCES: IpcResource[] = ["transfer", "message", "peer", "roster", "audit"];
+const ALL_RESOURCES: IpcResource[] = ["transfer", "message", "peer", "roster", "audit", "provider"];
 
 describe("event → query invalidation mapping", () => {
   it("maps every IpcResource the daemon can emit", () => {
@@ -25,6 +25,12 @@ describe("event → query invalidation mapping", () => {
     const keys = resourceInvalidations.roster.map((k) => k.join("/"));
     expect(keys).toContain(queryKeys.roster.join("/"));
     expect(keys).toContain(queryKeys.rosterExport.join("/"));
+  });
+
+  it("a provider change refreshes provider status and the roster", () => {
+    const keys = resourceInvalidations.provider.map((k) => k.join("/"));
+    expect(keys).toContain(queryKeys.provider.join("/"));
+    expect(keys).toContain(queryKeys.roster.join("/"));
   });
 
   it("a peer change does not needlessly invalidate transfer lists", () => {

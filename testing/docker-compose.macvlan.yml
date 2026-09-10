@@ -1,0 +1,47 @@
+name: ferry-two-peer-macvlan
+
+services:
+  alice:
+    build:
+      context: ..
+      dockerfile: testing/Dockerfile
+    image: ferry-test:latest
+    hostname: alice
+    networks: [ferrynet]
+    cap_add: [NET_ADMIN]
+    volumes:
+      - alice-data:/data
+      - shared:/shared
+    environment:
+      HOME: /root
+      FERRY_IDENTITY_PASSPHRASE: ci-two-peer-strict
+    command: ["ferry-daemon"]
+
+  bob:
+    image: ferry-test:latest
+    hostname: bob
+    networks: [ferrynet]
+    cap_add: [NET_ADMIN]
+    volumes:
+      - bob-data:/data
+      - shared:/shared
+    environment:
+      HOME: /root
+      FERRY_IDENTITY_PASSPHRASE: ci-two-peer-strict
+    command: ["ferry-daemon"]
+
+networks:
+  ferrynet:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: ferrymcast0
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+    enable_ipv6: false
+    ipam:
+      config:
+        - subnet: 172.31.71.0/24
+
+volumes:
+  alice-data:
+  bob-data:
+  shared:

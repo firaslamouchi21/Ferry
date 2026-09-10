@@ -1,0 +1,16 @@
+[package]
+name = "ferry-remote"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferry-core = { path = "../core" }
+ferry-proto = { path = "../proto" }
+base64 = "0.22"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+ureq = { version = "3.1", default-features = false, features = ["rustls"] }

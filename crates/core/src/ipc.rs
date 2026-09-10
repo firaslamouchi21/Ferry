@@ -2,9 +2,10 @@ use ferry_proto::envelope::PROTOCOL_VERSION;
 use ferry_proto::errors::{ErrorCode, FerryError};
 use ferry_proto::ipc::{
     AuditEventView, DaemonStatus, IdentityView, InboxItemView, IpcOutcome, IpcRequest, IpcResponse,
-    IpcResult, RosterImportSummaryView, RosterPeerView, SentItemView, IPC_PROTOCOL_VERSION,
+    IpcResult, MessageThreadView, MessageView, RosterImportSummaryView, RosterPeerView, SentItemView,
+    IPC_PROTOCOL_VERSION,
 };
-use ferry_proto::states::ItemKind;
+use ferry_proto::states::{ItemKind, TransferState};
 
 use base64::Engine;
 
@@ -145,6 +146,8 @@ pub fn handle(
             Ok(()) => IpcOutcome::Ok { value: IpcResult::Ack },
             Err(err) => internal_error(err.to_string()),
         },
+        IpcRequest::MessageThreads => message_threads_outcome(store),
+        IpcRequest::MessageThread { peer_id } => message_thread_outcome(store, &peer_id),
         IpcRequest::Subscribe => internal_error(
             "Subscribe is handled by the IPC server's event stream, not the request dispatcher".into(),
         ),
@@ -153,6 +156,16 @@ pub fn handle(
         | IpcRequest::PairConfirm { .. }
         | IpcRequest::PairCancel { .. } => internal_error(
             "pairing requests are handled by the daemon's pairing registry, not the request dispatcher".into(),
+        ),
+        IpcRequest::ProviderStatus
+        | IpcRequest::ProviderConnect { .. }
+        | IpcRequest::ProviderConnectPoll
+        | IpcRequest::ProviderDisconnect
+        | IpcRequest::GistPublish { .. }
+        | IpcRequest::RosterFetch { .. }
+        | IpcRequest::RosterApplyRemote { .. }
+        | IpcRequest::RemoteJobStatus { .. } => internal_error(
+            "remote provider requests are handled by the daemon's provider registry, not the request dispatcher".into(),
         ),
     };
 
@@ -526,6 +539,103 @@ fn sent_list_outcome(store: &impl Store) -> IpcOutcome {
     }
 }
 
+fn readable_state(state: TransferState) -> bool {
+    matches!(state, TransferState::Delivered | TransferState::Opened)
+}
+
+fn collect_messages(store: &impl Store) -> Result<Vec<MessageView>, crate::ports::StoreError> {
+    let mut out = Vec::new();
+
+    for item in store.list_inbox_items()? {
+        if item.kind != ItemKind::Message {
+            continue;
+        }
+        let body = if readable_state(item.state) {
+            store
+                .read_inbound_plaintext(&item.item_id)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_else(|_| item.name.clone())
+        } else {
+            item.name.clone()
+        };
+        out.push(MessageView {
+            item_id: item.item_id,
+            peer_id: item.peer_id,
+            outbound: false,
+            body,
+            state: item.state,
+            at_millis: item.received_at_millis.unwrap_or(0),
+        });
+    }
+
+    for item in store.list_sent_items()? {
+        if item.kind != ItemKind::Message {
+            continue;
+        }
+        let body = store
+            .read_outbound_content(&item.item_id)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_else(|_| item.name.clone());
+        out.push(MessageView {
+            item_id: item.item_id,
+            peer_id: item.peer_id,
+            outbound: true,
+            body,
+            state: item.state,
+            at_millis: item.queued_at_millis.unwrap_or(0),
+        });
+    }
+
+    out.sort_by_key(|m| m.at_millis);
+    Ok(out)
+}
+
+fn message_thread_outcome(store: &impl Store, peer_id: &str) -> IpcOutcome {
+    match collect_messages(store) {
+        Ok(messages) => IpcOutcome::Ok {
+            value: IpcResult::MessageThread(
+                messages.into_iter().filter(|m| m.peer_id == peer_id).collect(),
+            ),
+        },
+        Err(err) => internal_error(err.to_string()),
+    }
+}
+
+fn message_threads_outcome(store: &impl Store) -> IpcOutcome {
+    let messages = match collect_messages(store) {
+        Ok(m) => m,
+        Err(err) => return internal_error(err.to_string()),
+    };
+    let peers = match store.list_roster_peers() {
+        Ok(p) => p,
+        Err(err) => return internal_error(err.to_string()),
+    };
+
+    let mut threads: std::collections::HashMap<String, MessageThreadView> = std::collections::HashMap::new();
+    for message in messages {
+        let entry = threads.entry(message.peer_id.clone()).or_insert_with(|| {
+            let peer = peers.iter().find(|p| p.peer_id == message.peer_id);
+            MessageThreadView {
+                peer_id: message.peer_id.clone(),
+                display_name: peer.map(|p| p.display_name.clone()).unwrap_or_else(|| message.peer_id.clone()),
+                reachable: peer.map(|p| p.reachable).unwrap_or(false),
+                last_body: String::new(),
+                last_at_millis: 0,
+                count: 0,
+            }
+        });
+        entry.count += 1;
+        if message.at_millis >= entry.last_at_millis {
+            entry.last_at_millis = message.at_millis;
+            entry.last_body = message.body.chars().take(120).collect();
+        }
+    }
+
+    let mut threads: Vec<MessageThreadView> = threads.into_values().collect();
+    threads.sort_by_key(|t| std::cmp::Reverse(t.last_at_millis));
+    IpcOutcome::Ok { value: IpcResult::MessageThreads(threads) }
+}
+
 fn audit_list_outcome(store: &impl Store, limit: u32, before_millis: Option<i64>) -> IpcOutcome {
     match store.list_audit(limit, before_millis) {
         Ok(events) => IpcOutcome::Ok {
@@ -707,7 +817,7 @@ mod tests {
         ) -> Result<Option<crate::expiry::ExpiryDeadline>, crate::ports::StoreError> {
             unimplemented!("not needed for ipc tests")
         }
-        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str) -> Result<(), crate::ports::StoreError> {
+        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str, _cause: &str) -> Result<(), crate::ports::StoreError> {
             unimplemented!("not needed for ipc tests")
         }
         fn read_inbound_plaintext(&self, item_id: &str) -> Result<Vec<u8>, crate::ports::StoreError> {
@@ -1313,6 +1423,136 @@ mod tests {
                 assert!(events.iter().all(|e| e.occurred_at_millis < 350));
             }
             other => panic!("expected Ok(AuditList), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn message_threads_group_by_peer_and_a_thread_merges_both_directions_in_order() {
+        let mut store = healthy_store();
+        store.roster.push(crate::ports::RosterPeer {
+            peer_id: "peer-b".into(),
+            display_name: "laptop-b".into(),
+            paired_at_millis: 0,
+            reachable: true,
+            last_seen_millis: None,
+        });
+        store.inbound.insert(
+            "m-in".into(),
+            FakeInboundItem {
+                peer_id: "peer-b".into(),
+                kind: ItemKind::Message,
+                name: "hi from b".into(),
+                state: ferry_proto::states::TransferState::Delivered,
+                size_bytes: 9,
+                is_burn_after_read: false,
+                bytes: b"hi from b".to_vec(),
+            },
+        );
+        store.inbound.insert(
+            "f-in".into(),
+            FakeInboundItem {
+                peer_id: "peer-b".into(),
+                kind: ItemKind::File,
+                name: "not-a-message.bin".into(),
+                state: ferry_proto::states::TransferState::Delivered,
+                size_bytes: 4,
+                is_burn_after_read: false,
+                bytes: b"data".to_vec(),
+            },
+        );
+        store.sent_items.push(crate::ports::SentItem {
+            item_id: "m-out".into(),
+            peer_id: "peer-b".into(),
+            peer_display_name: "laptop-b".into(),
+            name: "reply to b".into(),
+            hash_hex: String::new(),
+            kind: ItemKind::Message,
+            state: ferry_proto::states::TransferState::Queued,
+            size_bytes: 10,
+            queued_at_millis: Some(5_000),
+            last_attempt_at_millis: None,
+            last_error: None,
+        });
+
+        match handle_with_defaults(&mut store, IpcRequest::MessageThreads).outcome {
+            IpcOutcome::Ok { value: IpcResult::MessageThreads(threads) } => {
+                assert_eq!(threads.len(), 1);
+                assert_eq!(threads[0].peer_id, "peer-b");
+                assert_eq!(threads[0].display_name, "laptop-b");
+                assert!(threads[0].reachable);
+                assert_eq!(threads[0].count, 2, "the file item must not count as a message");
+                assert_eq!(threads[0].last_body, "reply to b");
+            }
+            other => panic!("expected Ok(MessageThreads), got {other:?}"),
+        }
+
+        match handle_with_defaults(&mut store, IpcRequest::MessageThread { peer_id: "peer-b".into() }).outcome {
+            IpcOutcome::Ok { value: IpcResult::MessageThread(msgs) } => {
+                assert_eq!(msgs.len(), 2);
+                assert_eq!(msgs[0].at_millis, 0);
+                assert!(!msgs[0].outbound);
+                assert_eq!(msgs[0].body, "hi from b");
+                assert!(msgs[1].outbound);
+                assert_eq!(msgs[1].body, "reply to b");
+                assert_eq!(msgs[1].at_millis, 5_000);
+            }
+            other => panic!("expected Ok(MessageThread), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_message_from_an_unrostered_peer_still_forms_a_thread_keyed_by_peer_id() {
+        let mut store = healthy_store();
+        store.inbound.insert(
+            "m-in".into(),
+            FakeInboundItem {
+                peer_id: "ghost-peer".into(),
+                kind: ItemKind::Message,
+                name: "who am i".into(),
+                state: ferry_proto::states::TransferState::Delivered,
+                size_bytes: 7,
+                is_burn_after_read: false,
+                bytes: b"who am i".to_vec(),
+            },
+        );
+
+        match handle_with_defaults(&mut store, IpcRequest::MessageThreads).outcome {
+            IpcOutcome::Ok { value: IpcResult::MessageThreads(threads) } => {
+                assert_eq!(threads.len(), 1);
+                assert_eq!(threads[0].peer_id, "ghost-peer");
+                assert_eq!(
+                    threads[0].display_name, "ghost-peer",
+                    "an unrostered sender falls back to its peer id as the label"
+                );
+            }
+            other => panic!("expected Ok(MessageThreads), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_not_yet_readable_message_shows_its_name_as_a_preview_not_an_error() {
+        let mut store = healthy_store();
+        store.sent_items.push(crate::ports::SentItem {
+            item_id: "m-out".into(),
+            peer_id: "peer-b".into(),
+            peer_display_name: "laptop-b".into(),
+            name: "still in the outbox".into(),
+            hash_hex: String::new(),
+            kind: ItemKind::Message,
+            state: ferry_proto::states::TransferState::Queued,
+            size_bytes: 10,
+            queued_at_millis: Some(1),
+            last_attempt_at_millis: None,
+            last_error: None,
+        });
+
+        match handle_with_defaults(&mut store, IpcRequest::MessageThread { peer_id: "peer-b".into() }).outcome {
+            IpcOutcome::Ok { value: IpcResult::MessageThread(msgs) } => {
+                assert_eq!(msgs.len(), 1);
+                assert_eq!(msgs[0].body, "still in the outbox");
+                assert!(msgs[0].outbound);
+            }
+            other => panic!("expected Ok(MessageThread), got {other:?}"),
         }
     }
 

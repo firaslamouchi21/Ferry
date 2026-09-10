@@ -1,23 +1,26 @@
 # Ferry for VS Code
 
-Serverless peer-to-peer file, secret, and message transfer for developer teams.
-No server, no relay, no hosted component — every machine runs an identical daemon
-that is simultaneously client and server, discovering peers over the LAN and
-connecting directly over an authenticated, encrypted channel.
+Ferry moves files, secrets, and short messages straight between the machines on your team —
+no cloud, no account, no server anywhere in the path. Every machine runs the same small daemon,
+finds the others on your network, and connects to them directly over an encrypted channel.
 
-This extension hosts the Ferry panel inside VS Code and talks to a local
-`ferry-daemon`. Install and run the daemon separately; see the project README at
-https://github.com/firaslamouchi21/Ferry.
+This extension puts the Ferry panel inside VS Code and runs the daemon for you — it ships with
+the matching `ferry-daemon` binary, so there's nothing else to install.
 
-## Commands
+## What you can do
 
-- **Ferry: Open Panel** — the full Ferry UI in a webview
-- **Ferry: Pair a Device** — run the pairing ceremony
-- **Ferry: Send File** — also on the explorer right-click menu
-- **Ferry: Open Inbox**
+- **Ferry: Open Panel** — the full Ferry UI in a tab
+- **Ferry: Pair a Device** — walk through the pairing handshake
+- **Ferry: Send File** — also on the right-click menu in the Explorer
+- **Ferry: Open Inbox** — see what people have sent you
 - **Ferry: Copy My Fingerprint**
+- **Ferry: Start Daemon** / **Restart Daemon** — the extension does this on its own when you
+  open the panel, but the commands are there if you need them
 
 ## Settings
 
-- `ferry.socketPath` — path to the daemon IPC socket (empty = platform default)
-- `ferry.daemonPath` — the `ferry-daemon` binary for lifecycle actions
+- `ferry.socketPath` — where the daemon's IPC socket lives (leave blank for the default)
+- `ferry.daemonPath` — only used by builds that don't bundle a daemon; the platform-specific
+  extension carries its own
+
+The project lives at https://github.com/firaslamouchi21/Ferry.

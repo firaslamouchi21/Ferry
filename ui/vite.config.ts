@@ -6,8 +6,8 @@ import { attachBridge } from "./dev-bridge/bridge.js";
 const bridgePlugin = () => ({
   name: "ferry-daemon-bridge",
   apply: "serve" as const,
-  configureServer(server: { httpServer: unknown }) {
-    if (server.httpServer) attachBridge(server.httpServer);
+  configureServer(server: { httpServer: unknown; middlewares: unknown }) {
+    if (server.httpServer) attachBridge(server);
   },
 });
 

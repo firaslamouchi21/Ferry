@@ -6,7 +6,7 @@
   "version": "0.1.0",
   "type": "commonjs",
   "publisher": "ferry",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/firaslamouchi21/Ferry.git" },
   "engines": { "vscode": "^1.85.0" },
   "categories": ["Other"],
@@ -25,7 +25,9 @@
       { "command": "ferry.sendFile", "title": "Ferry: Send File" },
       { "command": "ferry.openInbox", "title": "Ferry: Open Inbox" },
       { "command": "ferry.copyFingerprint", "title": "Ferry: Copy My Fingerprint" },
-      { "command": "ferry.refreshPeers", "title": "Ferry: Refresh Peers", "icon": "$(refresh)" }
+      { "command": "ferry.refreshPeers", "title": "Ferry: Refresh Peers", "icon": "$(refresh)" },
+      { "command": "ferry.startDaemon", "title": "Ferry: Start Daemon" },
+      { "command": "ferry.restartDaemon", "title": "Ferry: Restart Daemon" }
     ],
     "menus": {
       "explorer/context": [{ "command": "ferry.sendFile", "group": "7_modification", "when": "!explorerResourceIsFolder" }],
@@ -42,7 +44,7 @@
         "ferry.daemonPath": {
           "type": "string",
           "default": "ferry-daemon",
-          "description": "Path to the ferry-daemon binary used for lifecycle actions."
+          "description": "Path to the ferry-daemon binary. Used only when this build has no bundled binary; the platform-specific extension ships its own."
         }
       }
     }
@@ -50,13 +52,17 @@
   "scripts": {
     "build": "pnpm --filter @ferry/ui build && node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
-    "package": "pnpm run build && vsce package --no-dependencies -o ferry.vsix"
+    "package": "node scripts/package.mjs",
+    "test:activation": "node scripts/activation-smoke.cjs",
+    "test:e2e": "pnpm run build && node test/runTests.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/test-electron": "^2.4.1",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.21.5",
+    "ovsx": "^0.10.1",
     "typescript": "^5.6.3"
   }
 }

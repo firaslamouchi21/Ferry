@@ -33,7 +33,7 @@ describe("catalog completeness", () => {
 
 describe("translate", () => {
   it("interpolates named vars", () => {
-    expect(translate("en", "nav.connectedVersion", { version: 7 })).toBe("Connected v7");
+    expect(translate("en", "nav.connectedVersion", { version: 7 })).toBe("Daemon running · v7");
   });
 
   it("leaves unknown placeholders untouched", () => {

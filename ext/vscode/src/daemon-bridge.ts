@@ -1,7 +1,9 @@
+import * as vscode from "vscode";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { makeFrameReader, writeFrame } from "./framing";
+import { startDaemon } from "./daemon-lifecycle";
 
 export function defaultSocketPath(): string {
   const home = os.homedir();
@@ -23,6 +25,7 @@ export class DaemonBridge {
   constructor(
     private socketPath: string,
     private post: Outbound,
+    private context: vscode.ExtensionContext,
   ) {}
 
   handle(message: { kind?: string; envelope?: unknown }): void {
@@ -36,8 +39,22 @@ export class DaemonBridge {
       this.subscribeSocket = null;
       return;
     }
+    if (message.kind === "start-daemon") {
+      void this.startDaemon();
+      return;
+    }
     if (message.kind === "request" && message.envelope) {
       this.request(message.envelope as { request_id?: string });
+    }
+  }
+
+  private async startDaemon(): Promise<void> {
+    try {
+      await startDaemon(this.context, this.socketPath);
+      this.post({ kind: "daemon-start-result", ok: true });
+      this.openSubscription();
+    } catch (err) {
+      this.post({ kind: "daemon-start-result", ok: false, message: String((err as Error).message ?? err) });
     }
   }
 

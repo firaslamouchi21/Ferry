@@ -13,6 +13,14 @@ use crate::expiry::ExpiryClock;
 use crate::ports::{Channel, ChannelError, NewOutboundItem, Store, StoreError};
 use crate::state::{TransitionError, TRANSFER_TRANSITIONS};
 
+fn test_chunk_delay() -> Option<std::time::Duration> {
+    std::env::var("FERRY_TEST_CHUNK_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+        .map(std::time::Duration::from_millis)
+}
+
 #[derive(Debug, Error)]
 pub enum TransferError {
     #[error("channel error: {0}")]
@@ -239,6 +247,7 @@ pub fn send_item_reporting(
     let resume_seq = resume_seq_from_offset(accept.offset, DEFAULT_CHUNK_BYTES);
     source.seek(SeekFrom::Start(accept.offset))?;
 
+    let chunk_delay = test_chunk_delay();
     let mut sent = accept.offset;
     for chunk in Chunker::new(source, DEFAULT_CHUNK_BYTES, resume_seq) {
         let (seq, bytes) = chunk?;
@@ -246,6 +255,9 @@ pub fn send_item_reporting(
         send_chunk(channel, item_id, seq, bytes)?;
         sent += n;
         on_progress(item_id, sent, item.size_bytes);
+        if let Some(d) = chunk_delay {
+            std::thread::sleep(d);
+        }
     }
     send_done(channel, item_id, &item.hash)?;
 
@@ -698,7 +710,7 @@ mod tests {
             unimplemented!("not needed for transfer tests")
         }
 
-        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str) -> Result<(), StoreError> {
+        fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str, _cause: &str) -> Result<(), StoreError> {
             unimplemented!("not needed for transfer tests")
         }
 
@@ -910,6 +922,70 @@ mod tests {
             !receiver_store.inbound.contains_key("item-1"),
             "a policy-rejected offer must never create an inbound row"
         );
+    }
+
+    #[test]
+    fn receive_item_rejects_an_over_cap_message_offer_before_persisting_anything() {
+        let (mut sender_channel, mut receiver_channel) = paired_channels("peer-a", "peer-b");
+        let mut item = sample_item();
+        item.kind = ferry_proto::states::ItemKind::Message;
+        item.size_bytes = crate::policy::MAX_MESSAGE_BYTES + 1;
+
+        let sender_thread = std::thread::spawn(move || {
+            send_offer(&mut sender_channel, "item-1", &item).unwrap();
+        });
+
+        let mut receiver_store = FakeStore::default();
+        let clock = ExpiryClock::new();
+        let result = receive_item(&mut receiver_channel, &mut receiver_store, &clock, "peer-a", "local");
+        sender_thread.join().unwrap();
+
+        assert!(matches!(
+            result,
+            Err(TransferError::Policy(crate::policy::PolicyError::ItemTooLargeForKind { .. }))
+        ));
+        assert!(
+            !receiver_store.inbound.contains_key("item-1"),
+            "an over-cap message offer must never create an inbound row"
+        );
+    }
+
+    #[test]
+    fn receiver_survives_an_adversarial_sender_ttl_without_overflowing_the_deadline() {
+        for ttl in [0u32, 1, 3600, u32::MAX] {
+            let (mut sender_channel, mut receiver_channel) = paired_channels("peer-a", "peer-b");
+            let payload = b"x".to_vec();
+            let mut hasher = Sha256::new();
+            hasher.update(&payload);
+            let hash = hex::encode(hasher.finalize());
+
+            let mut item = sample_item();
+            item.hash = hash.clone();
+            item.size_bytes = 1;
+            item.ttl_secs = ttl;
+
+            let sent_hash = hash.clone();
+            let sender_thread = std::thread::spawn(move || {
+                send_offer(&mut sender_channel, "item-1", &item).unwrap();
+                match recv_message(&mut sender_channel).unwrap() {
+                    WireMessage::Accept(_) => {}
+                    other => panic!("expected Accept, got {other:?}"),
+                }
+                send_chunk(&mut sender_channel, "item-1", 0, payload).unwrap();
+                send_done(&mut sender_channel, "item-1", &sent_hash).unwrap();
+                let _ = recv_message(&mut sender_channel);
+            });
+
+            let mut receiver_store = FakeStore::default();
+            let clock = ExpiryClock::new();
+            let result = receive_item(&mut receiver_channel, &mut receiver_store, &clock, "peer-a", "local");
+            sender_thread.join().unwrap();
+            result.unwrap();
+
+            let deadline = receiver_store.get_inbound_expiry("item-1").unwrap().unwrap();
+            assert!(deadline.expires_at_wall_estimate_millis >= clock.now_millis() || ttl == 0);
+            let _ = deadline.expires_at_monotonic_millis;
+        }
     }
 
     #[test]

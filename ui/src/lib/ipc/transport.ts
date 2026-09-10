@@ -9,12 +9,16 @@ export interface Transport {
   phase(): ConnectionPhase;
   start(): void;
   stop(): void;
+  retryNow(): void;
+  canStartDaemon(): boolean;
+  startDaemon(): Promise<void>;
 }
 
 type BridgeMessage =
   | { kind: "response"; data: IpcResponse }
   | { kind: "event"; data: IpcEvent }
   | { kind: "error"; id?: string; message: string }
+  | { kind: "daemon-start-result"; ok: boolean; message?: string }
   | { kind: "subscribe_closed" };
 
 class Emitter<T> {
@@ -60,6 +64,29 @@ export class WebSocketTransport implements Transport {
     this.teardown(this.ws);
     this.ws = null;
     this.setPhase("disconnected");
+  }
+
+  retryNow() {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return;
+    this.teardown(this.ws);
+    this.ws = null;
+    this.reconnectDelay = 500;
+    this.stopped = false;
+    this.connect();
+  }
+
+  canStartDaemon() {
+    return typeof fetch === "function" && typeof window !== "undefined";
+  }
+
+  async startDaemon() {
+    const base = typeof window !== "undefined" ? window.location.origin : "";
+    const res = await fetch(`${base}/ferry-daemon/start`, { method: "POST" });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(body || `the dev bridge could not start the daemon (HTTP ${res.status})`);
+    }
+    this.retryNow();
   }
 
   private teardown(ws: WebSocket | null) {
@@ -196,7 +223,11 @@ export class VsCodeTransport implements Transport {
     window.addEventListener("message", (event) => this.handle(event.data));
   }
 
-  private handle(msg: BridgeMessage & { phase?: ConnectionPhase }) {
+  private daemonStart: { resolve: () => void; reject: (e: Error) => void } | null = null;
+
+  private handle(
+    msg: BridgeMessage & { phase?: ConnectionPhase; ok?: boolean; message?: string },
+  ) {
     if (!msg || typeof msg !== "object") return;
     if (msg.kind === "event") {
       this.events.emit(msg.data);
@@ -205,8 +236,12 @@ export class VsCodeTransport implements Transport {
       this.pending.get(id)?.(msg.data);
       this.pending.delete(id);
       this.rejecters.delete(id);
+    } else if (msg.kind === "daemon-start-result") {
+      if (msg.ok) this.daemonStart?.resolve();
+      else this.daemonStart?.reject(new Error(msg.message || "could not start the daemon"));
+      this.daemonStart = null;
     } else if (msg.kind === "error" && msg.id) {
-      this.rejecters.get(msg.id)?.(new Error(msg.message));
+      this.rejecters.get(msg.id)?.(new Error(msg.message ?? "daemon error"));
       this.pending.delete(msg.id);
       this.rejecters.delete(msg.id);
     } else if ("phase" in msg && msg.phase) {
@@ -225,6 +260,27 @@ export class VsCodeTransport implements Transport {
 
   stop() {
     this.api.postMessage({ kind: "stop" });
+  }
+
+  retryNow() {
+    this.api.postMessage({ kind: "start" });
+  }
+
+  canStartDaemon() {
+    return true;
+  }
+
+  startDaemon() {
+    return new Promise<void>((resolve, reject) => {
+      this.daemonStart = { resolve, reject };
+      this.api.postMessage({ kind: "start-daemon" });
+      setTimeout(() => {
+        if (this.daemonStart) {
+          this.daemonStart.reject(new Error("starting the daemon timed out"));
+          this.daemonStart = null;
+        }
+      }, 12000);
+    });
   }
 
   send(envelope: IpcEnvelope): Promise<IpcResponse> {

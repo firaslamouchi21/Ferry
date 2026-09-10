@@ -5,6 +5,8 @@ pub mod file_source;
 pub mod ipc_server;
 pub mod pairing;
 pub mod presence;
+pub mod provider;
+pub mod remote_worker;
 pub mod p2p;
 pub mod roster_authorizer;
 pub mod staged;

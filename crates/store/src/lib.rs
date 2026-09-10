@@ -6,5 +6,6 @@ pub mod outbound;
 pub mod outbox;
 pub mod payload;
 pub mod receipts;
+pub mod remote_jobs;
 pub mod roster;
 mod time;

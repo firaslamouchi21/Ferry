@@ -1,0 +1,7 @@
+Ferry
+Copyright 2026 Firas Lamouchi
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It bundles third-party open-source components, each under its own license; run
+`cargo deny check` for the current list.

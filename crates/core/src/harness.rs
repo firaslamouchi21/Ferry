@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ use crate::policy::PolicyError;
 use crate::ports::{Channel, ChannelError, NewOutboundItem, OutboxItem, Store, StoreError};
 use crate::state::TRANSFER_TRANSITIONS;
 use crate::transfer::{
-    accept_inbound_offer, open_item, receive_item, receive_next_inbound, recv_message, reject_inbound_offer,
+    accept_inbound_offer, open_item, open_item_locally, receive_item, receive_next_inbound, recv_message, reject_inbound_offer,
     send_accept, send_chunk, send_item, send_offer, InboundEvent, TransferError,
 };
 
@@ -28,6 +28,8 @@ struct InboundRecord {
     state: TransferState,
     bytes: Vec<u8>,
     is_burn_after_read: bool,
+    wrapped_dek_present: bool,
+    next_seq: u64,
 }
 
 #[derive(Default)]
@@ -40,6 +42,9 @@ pub struct InMemoryStore {
     outbox: Vec<OutboxItem>,
     outbox_attempts: HashMap<String, u32>,
     next_id: u64,
+    dropped_outbound: Vec<String>,
+    outbound_last_error: HashMap<String, String>,
+    fail_burn_between_steps: bool,
 }
 
 impl InMemoryStore {
@@ -53,6 +58,20 @@ impl InMemoryStore {
 
     pub fn add_roster_peer(&mut self, peer_id: &str) {
         self.roster.insert(peer_id.to_string());
+    }
+
+    #[allow(dead_code)]
+    fn dropped_outbound(&self) -> &[String] {
+        &self.dropped_outbound
+    }
+
+    #[allow(dead_code)]
+    fn last_error_for(&self, item_id: &str) -> Option<&str> {
+        self.outbound_last_error.get(item_id).map(|s| s.as_str())
+    }
+
+    fn inbound_wrapped_dek_present(&self, item_id: &str) -> bool {
+        self.inbound.get(item_id).map(|r| r.wrapped_dek_present).unwrap_or(false)
     }
 }
 
@@ -102,6 +121,8 @@ impl Store for InMemoryStore {
             state: TransferState::Offered,
             bytes: Vec::new(),
             is_burn_after_read: offer.burn_after_read,
+            wrapped_dek_present: true,
+            next_seq: 0,
         });
         Ok(())
     }
@@ -122,12 +143,16 @@ impl Store for InMemoryStore {
         Ok(self.inbound.get(item_id).map(|r| r.bytes.len() as u64).unwrap_or(0))
     }
 
-    fn append_inbound_chunk(&mut self, item_id: &str, _seq: u64, bytes: &[u8]) -> Result<(), StoreError> {
-        self.inbound
+    fn append_inbound_chunk(&mut self, item_id: &str, seq: u64, bytes: &[u8]) -> Result<(), StoreError> {
+        let record = self
+            .inbound
             .get_mut(item_id)
-            .ok_or_else(|| StoreError("no such inbound item".into()))?
-            .bytes
-            .extend_from_slice(bytes);
+            .ok_or_else(|| StoreError("no such inbound item".into()))?;
+        if seq < record.next_seq {
+            return Ok(());
+        }
+        record.bytes.extend_from_slice(bytes);
+        record.next_seq = seq + 1;
         Ok(())
     }
 
@@ -146,12 +171,17 @@ impl Store for InMemoryStore {
     }
 
     fn mark_inbound_opened(&mut self, item_id: &str) -> Result<(), StoreError> {
+        let fail_between = self.fail_burn_between_steps;
         let record = self
             .inbound
             .get_mut(item_id)
             .ok_or_else(|| StoreError("no such inbound item".into()))?;
         if record.is_burn_after_read {
+            record.wrapped_dek_present = false;
             record.bytes.clear();
+            if fail_between {
+                return Err(StoreError("simulated crash mid-burn".into()));
+            }
         }
         record.state = TransferState::Opened;
         Ok(())
@@ -193,7 +223,13 @@ impl Store for InMemoryStore {
         Ok(self.outbox_expiry.get(item_id).cloned())
     }
 
-    fn record_outbound_dropped(&mut self, _item_id: &str, _actor: &str) -> Result<(), StoreError> {
+    fn record_outbound_dropped(&mut self, item_id: &str, _actor: &str, _cause: &str) -> Result<(), StoreError> {
+        self.dropped_outbound.push(item_id.to_string());
+        Ok(())
+    }
+
+    fn set_outbound_last_error(&mut self, item_id: &str, reason: &str) -> Result<(), StoreError> {
+        self.outbound_last_error.insert(item_id.to_string(), reason.to_string());
         Ok(())
     }
 
@@ -231,23 +267,64 @@ impl Store for InMemoryStore {
     }
 }
 
+#[derive(Clone, Default)]
+struct FaultControls {
+    partitioned: Arc<AtomicBool>,
+    delay_ms: Arc<AtomicU64>,
+    drop_every_nth: Arc<AtomicU64>,
+    die_after_n_frames: Arc<AtomicU64>,
+}
+
+#[allow(dead_code)]
+impl FaultControls {
+    fn partition(&self) {
+        self.partitioned.store(true, Ordering::SeqCst);
+    }
+    fn heal(&self) {
+        self.partitioned.store(false, Ordering::SeqCst);
+    }
+    fn set_delay_ms(&self, ms: u64) {
+        self.delay_ms.store(ms, Ordering::SeqCst);
+    }
+    fn drop_every(&self, n: u64) {
+        self.drop_every_nth.store(n, Ordering::SeqCst);
+    }
+    fn die_after(&self, n: u64) {
+        self.die_after_n_frames.store(n, Ordering::SeqCst);
+    }
+}
+
 struct HarnessChannel {
     peer_id: String,
     tx: Sender<Vec<u8>>,
     rx: Receiver<Vec<u8>>,
-    partitioned: Arc<AtomicBool>,
+    faults: FaultControls,
+    sent: u64,
 }
 
 impl Channel for HarnessChannel {
     fn send(&mut self, bytes: &[u8]) -> Result<(), ChannelError> {
-        if self.partitioned.load(Ordering::SeqCst) {
+        if self.faults.partitioned.load(Ordering::SeqCst) {
             return Err(ChannelError("partitioned — peer unreachable".into()));
+        }
+        let die_after = self.faults.die_after_n_frames.load(Ordering::SeqCst);
+        if die_after != 0 && self.sent >= die_after {
+            return Err(ChannelError("link died mid-transfer".into()));
+        }
+        let delay = self.faults.delay_ms.load(Ordering::SeqCst);
+        if delay != 0 {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+        }
+        self.sent += 1;
+        let nth = self.faults.drop_every_nth.load(Ordering::SeqCst);
+        if nth != 0 && self.sent.is_multiple_of(nth) {
+            return Ok(());
         }
         self.tx.send(bytes.to_vec()).map_err(|e| ChannelError(e.to_string()))
     }
 
     fn recv(&mut self) -> Result<Vec<u8>, ChannelError> {
-        if self.partitioned.load(Ordering::SeqCst) {
+        if self.faults.partitioned.load(Ordering::SeqCst) {
             return Err(ChannelError("partitioned — peer unreachable".into()));
         }
         self.rx.recv().map_err(|e| ChannelError(e.to_string()))
@@ -259,23 +336,30 @@ impl Channel for HarnessChannel {
 }
 
 fn network(a_id: &str, b_id: &str) -> (HarnessChannel, HarnessChannel, Arc<AtomicBool>) {
+    let (a, b, faults) = network_with_faults(a_id, b_id);
+    (a, b, faults.partitioned)
+}
+
+fn network_with_faults(a_id: &str, b_id: &str) -> (HarnessChannel, HarnessChannel, FaultControls) {
     let (tx_a, rx_b) = mpsc::channel();
     let (tx_b, rx_a) = mpsc::channel();
-    let partitioned = Arc::new(AtomicBool::new(false));
+    let faults = FaultControls::default();
     (
         HarnessChannel {
             peer_id: b_id.into(),
             tx: tx_a,
             rx: rx_a,
-            partitioned: partitioned.clone(),
+            faults: faults.clone(),
+            sent: 0,
         },
         HarnessChannel {
             peer_id: a_id.into(),
             tx: tx_b,
             rx: rx_b,
-            partitioned: partitioned.clone(),
+            faults: faults.clone(),
+            sent: 0,
         },
-        partitioned,
+        faults,
     )
 }
 
@@ -764,6 +848,147 @@ fn a_rejected_offer_sends_a_reject_on_reconnect_and_the_sender_marks_it_failed()
     assert_eq!(
         sender_store.get_outbound_state(&item_id).unwrap(),
         Some(TransferState::Failed)
+    );
+}
+
+#[test]
+fn real_engine_link_death_mid_transfer_then_resume_delivers_the_whole_file() {
+    let payload: Vec<u8> = (0..300_000u32).map(|n| (n % 256) as u8).collect();
+    let mut hasher = Sha256::new();
+    hasher.update(&payload);
+    let expected = hex::encode(hasher.finalize());
+    let mut item = sample_item(&expected, payload.len() as u64);
+    item.hash = expected;
+
+    let mut receiver_store = InMemoryStore::default();
+    let mut sender_store = InMemoryStore::with_roster(&["peer-b"]);
+    let sender_clock = ExpiryClock::new();
+    let item_id = enqueue_send(&mut sender_store, &sender_clock, &item, "local").unwrap();
+
+    {
+        let (mut sc, mut rc, faults) = network_with_faults("peer-a", "peer-b");
+        faults.die_after(3);
+        let p = payload.clone();
+        let it = item.clone();
+        let id = item_id.clone();
+        let sender_thread = std::thread::spawn(move || {
+            let _ = send_item(&mut sc, &mut sender_store, &id, &it, Cursor::new(p));
+            sender_store
+        });
+        let clock = ExpiryClock::new();
+        let _ = receive_item(&mut rc, &mut receiver_store, &clock, "peer-a", "local");
+        sender_store = sender_thread.join().unwrap();
+    }
+
+    let partial = receiver_store.inbound_bytes_received(&item_id).unwrap();
+    assert!(
+        partial > 0 && partial < payload.len() as u64,
+        "the receiver should hold a partial payload after the link died, got {partial}"
+    );
+    sender_store
+        .set_outbound_state(&item_id, TransferState::Transferring)
+        .unwrap();
+
+    let (mut sc, mut rc, _faults) = network_with_faults("peer-a", "peer-b");
+    let p = payload.clone();
+    let it = item.clone();
+    let id = item_id.clone();
+    let sender_thread = std::thread::spawn(move || {
+        send_item(&mut sc, &mut sender_store, &id, &it, Cursor::new(p)).unwrap();
+        sender_store
+    });
+    let clock = ExpiryClock::new();
+    receive_item(&mut rc, &mut receiver_store, &clock, "peer-a", "local").unwrap();
+    let sender_store = sender_thread.join().unwrap();
+
+    assert_eq!(receiver_store.inbound.get(&item_id).unwrap().bytes, payload);
+    assert_eq!(
+        sender_store.get_outbound_state(&item_id).unwrap(),
+        Some(TransferState::Delivered)
+    );
+}
+
+#[test]
+fn a_message_item_round_trips_end_to_end_over_the_transfer_engine() {
+    let body = b"hey, pushed the fix to the sandbox branch".to_vec();
+    let mut hasher = Sha256::new();
+    hasher.update(&body);
+    let mut item = sample_item(&hex::encode(hasher.finalize()), body.len() as u64);
+    item.kind = ItemKind::Message;
+    item.name = String::from_utf8(body.clone()).unwrap();
+
+    let mut sender_store = InMemoryStore::with_roster(&["peer-b"]);
+    let sender_clock = ExpiryClock::new();
+    let item_id = enqueue_send(&mut sender_store, &sender_clock, &item, "local").unwrap();
+
+    let mut receiver_store = InMemoryStore::default();
+    let (mut sc, mut rc, _faults) = network_with_faults("peer-a", "peer-b");
+    let it = item.clone();
+    let id = item_id.clone();
+    let b = body.clone();
+    let sender_thread = std::thread::spawn(move || {
+        send_item(&mut sc, &mut sender_store, &id, &it, Cursor::new(b)).unwrap();
+        sender_store
+    });
+    let clock = ExpiryClock::new();
+    let offer = receive_item(&mut rc, &mut receiver_store, &clock, "peer-a", "local").unwrap();
+    let sender_store = sender_thread.join().unwrap();
+
+    assert_eq!(offer.kind, ItemKind::Message);
+    assert_eq!(receiver_store.inbound.get(&item_id).unwrap().bytes, body);
+    assert_eq!(
+        receiver_store.get_inbound_state(&item_id).unwrap(),
+        Some(TransferState::Delivered)
+    );
+    assert_eq!(
+        sender_store.get_outbound_state(&item_id).unwrap(),
+        Some(TransferState::Delivered)
+    );
+}
+
+#[test]
+fn a_crash_between_burn_steps_leaves_no_wrapped_dek_and_unreadable_ciphertext() {
+    let mut hasher = Sha256::new();
+    hasher.update(b"secret");
+    let mut item = sample_item(&hex::encode(hasher.finalize()), 6);
+    item.is_burn_after_read = true;
+
+    let mut sender_store = InMemoryStore::with_roster(&["peer-b"]);
+    let sender_clock = ExpiryClock::new();
+    let item_id = enqueue_send(&mut sender_store, &sender_clock, &item, "local").unwrap();
+
+    let mut receiver_store = InMemoryStore::default();
+    let (mut sc, mut rc, _faults) = network_with_faults("peer-a", "peer-b");
+    let it = item.clone();
+    let id = item_id.clone();
+    let sender_thread = std::thread::spawn(move || {
+        send_item(&mut sc, &mut sender_store, &id, &it, Cursor::new(b"secret".to_vec())).unwrap();
+    });
+    let clock = ExpiryClock::new();
+    receive_item(&mut rc, &mut receiver_store, &clock, "peer-a", "local").unwrap();
+    sender_thread.join().unwrap();
+
+    assert_eq!(
+        receiver_store.get_inbound_state(&item_id).unwrap(),
+        Some(TransferState::Delivered)
+    );
+
+    receiver_store.fail_burn_between_steps = true;
+    let clock = ExpiryClock::new();
+    let result = open_item_locally(&mut receiver_store, &clock, &item_id);
+    assert!(result.is_err(), "the simulated mid-burn crash must surface as an error");
+    assert!(
+        !receiver_store.inbound_wrapped_dek_present(&item_id),
+        "the wrapped DEK must be gone before the crash point"
+    );
+    assert!(
+        receiver_store.inbound.get(&item_id).unwrap().bytes.is_empty(),
+        "the ciphertext must not survive an interrupted burn as openable content"
+    );
+    assert_ne!(
+        receiver_store.get_inbound_state(&item_id).unwrap(),
+        Some(TransferState::Opened),
+        "an interrupted burn must not record the item as cleanly Opened"
     );
 }
 
