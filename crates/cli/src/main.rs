@@ -1,5 +1,5 @@
 use std::io::{self, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, Stdio};
 use std::sync::OnceLock;
@@ -718,17 +718,42 @@ fn cmd_pair_listen(bind: &str, name: &str) -> Result<(), String> {
     println!("connection from {peer_addr}");
 
     let identity = local_identity()?;
-    let outcome = pairing::run_pairing_exchange(stream, &code, &identity, name, confirm_verification_phrase)?;
+    let outcome = run_exchange_with_timeouts(stream, &code, &identity, name)?;
     complete_pairing(outcome)
 }
 
 fn cmd_pair_connect(addr: &str, code: &str, name: &str) -> Result<(), String> {
     let target = ferry_net::addr::normalize_host_port(addr)?;
-    let stream =
-        TcpStream::connect(&target).map_err(|source| format!("failed to connect to {target}: {source}"))?;
+    let stream = std::net::TcpStream::connect_timeout(
+        &target
+            .to_socket_addrs()
+            .map_err(|e| format!("{target}: {e}"))?
+            .next()
+            .ok_or_else(|| format!("{target} did not resolve to an address"))?,
+        Duration::from_secs(15),
+    )
+    .map_err(|source| format!("failed to connect to {target}: {source}"))?;
     let identity = local_identity()?;
-    let outcome = pairing::run_pairing_exchange(stream, code, &identity, name, confirm_verification_phrase)?;
+    let outcome = run_exchange_with_timeouts(stream, code, &identity, name)?;
     complete_pairing(outcome)
+}
+
+fn run_exchange_with_timeouts(
+    stream: TcpStream,
+    code: &str,
+    identity: &ferry_crypto::identity::Identity,
+    name: &str,
+) -> Result<pairing::PairingOutcome, String> {
+    let exchange = Duration::from_secs(20);
+    let _ = stream.set_read_timeout(Some(exchange));
+    let _ = stream.set_write_timeout(Some(exchange));
+    let for_confirm = stream.try_clone().ok();
+    let before_confirm = move || {
+        if let Some(s) = &for_confirm {
+            let _ = s.set_read_timeout(Some(Duration::from_secs(600)));
+        }
+    };
+    pairing::run_pairing_exchange(stream, code, identity, name, before_confirm, confirm_verification_phrase)
 }
 
 fn cmd_receive_list() -> Result<(), String> {

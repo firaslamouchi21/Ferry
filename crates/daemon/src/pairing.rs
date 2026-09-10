@@ -10,6 +10,7 @@ use ferry_crypto::identity::Identity;
 use ferry_proto::ipc::{PairBeginView, PairMode, PairPhase, PairStatusView};
 
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(300);
+const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Slot {
     phase: PairPhase,
@@ -89,8 +90,7 @@ impl PairingRegistry {
                 }
                 (PairMode::Connect { addr, .. }, _) => {
                     match ferry_net::addr::normalize_host_port(addr) {
-                        Ok(target) => TcpStream::connect(&target)
-                            .map_err(|e| format!("could not reach {target}: {e}")),
+                        Ok(target) => connect_with_timeout(&target),
                         Err(e) => Err(e),
                     }
                 }
@@ -99,6 +99,16 @@ impl PairingRegistry {
             let stream = match stream {
                 Ok(s) => s,
                 Err(e) => return fail(&slot_thread, e),
+            };
+            let _ = stream.set_read_timeout(Some(EXCHANGE_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(EXCHANGE_TIMEOUT));
+
+            let stream_for_confirm = stream.try_clone().ok();
+            let before_confirm = move || {
+                if let Some(s) = &stream_for_confirm {
+                    let _ = s.set_read_timeout(Some(CONFIRM_TIMEOUT + EXCHANGE_TIMEOUT));
+                    let _ = s.set_write_timeout(Some(EXCHANGE_TIMEOUT));
+                }
             };
 
             let confirm = |phrase: &str| -> bool {
@@ -112,7 +122,7 @@ impl PairingRegistry {
                 rx.recv_timeout(CONFIRM_TIMEOUT).unwrap_or(false)
             };
 
-            match run_pairing_exchange(stream, &code_thread, &identity, &name, confirm) {
+            match run_pairing_exchange(stream, &code_thread, &identity, &name, before_confirm, confirm) {
                 Ok(outcome) => {
                     let mut s = slot_thread.lock().unwrap();
                     s.peer_fingerprint = Some(outcome.peer_id.clone());
@@ -182,6 +192,21 @@ impl PairingRegistry {
             }
         }
     }
+}
+
+fn connect_with_timeout(target: &str) -> Result<TcpStream, String> {
+    use std::net::ToSocketAddrs;
+    let mut last_err = format!("{target} did not resolve to any address");
+    for sock in target
+        .to_socket_addrs()
+        .map_err(|e| format!("could not resolve {target}: {e}"))?
+    {
+        match TcpStream::connect_timeout(&sock, Duration::from_secs(12)) {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = format!("could not reach {sock}: {e}"),
+        }
+    }
+    Err(last_err)
 }
 
 fn advertised_ip() -> IpAddr {
