@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ferry_net::framing::{self, FramingError, IPC_MAX_FRAME_BYTES};
 use ferry_net::local_ipc::{self, Listener, Stream};
+
+const IPC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 
 use ferry_core::expiry::ExpiryClock;
 use ferry_core::ipc::RuntimeStatus;
@@ -81,6 +84,10 @@ fn handle_connection(
     pairing: &PairingRegistry,
     provider: &ProviderRegistry,
 ) -> bool {
+    if let Err(err) = local_ipc::set_timeouts(&stream, Some(IPC_CONNECTION_TIMEOUT)) {
+        eprintln!("ferry-daemon: could not set IPC connection timeout: {err}");
+    }
+
     let frame = match ipc_read_frame(&mut stream) {
         Ok(frame) => frame,
         Err(err) => {
@@ -98,6 +105,9 @@ fn handle_connection(
     };
 
     if matches!(envelope.request, IpcRequest::Subscribe) {
+        if let Err(err) = local_ipc::set_timeouts(&stream, None) {
+            eprintln!("ferry-daemon: could not clear IPC connection timeout: {err}");
+        }
         spawn_event_stream(stream, event_bus);
         return false;
     }

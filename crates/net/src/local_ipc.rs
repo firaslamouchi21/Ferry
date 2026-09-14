@@ -1,5 +1,6 @@
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{ListenerOptions, Name};
@@ -40,6 +41,11 @@ pub fn connect(socket_path: &Path) -> io::Result<Stream> {
 
 pub fn accept(listener: &Listener) -> io::Result<Stream> {
     listener.accept()
+}
+
+pub fn set_timeouts(stream: &Stream, timeout: Option<Duration>) -> io::Result<()> {
+    stream.set_recv_timeout(timeout)?;
+    stream.set_send_timeout(timeout)
 }
 
 pub fn cleanup(socket_path: &Path) {
