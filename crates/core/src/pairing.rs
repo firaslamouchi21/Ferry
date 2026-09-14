@@ -31,6 +31,7 @@ pub fn run_pairing_exchange(
     code: &str,
     local_identity: &Identity,
     local_display_name: &str,
+    before_confirm: impl FnOnce(),
     confirm: impl FnOnce(&str) -> bool,
 ) -> Result<PairingOutcome, String> {
     let (session, my_spake_msg) = PairingSession::start(code.as_bytes());
@@ -62,6 +63,7 @@ pub fn run_pairing_exchange(
         .map_err(|e| format!("peer sent a malformed signing key: {e}"))?;
     let phrase = verification_phrase(&local_identity.verifying_key(), &remote_key);
 
+    before_confirm();
     let confirmed = confirm(&phrase);
     let my_ack: [u8; 1] = if confirmed { [1] } else { [0] };
     let sealed_ack = channel.encrypt(&my_ack).map_err(|e| e.to_string())?;
@@ -108,10 +110,10 @@ mod tests {
         let fingerprint_b = identity_b.fingerprint();
 
         let thread_b = std::thread::spawn(move || {
-            run_pairing_exchange(stream_b, "482913", &identity_b, "phone-b", |_phrase| true)
+            run_pairing_exchange(stream_b, "482913", &identity_b, "phone-b", || {}, |_phrase| true)
         });
 
-        let outcome_a = run_pairing_exchange(stream_a, "482913", &identity_a, "laptop-a", |_phrase| true).unwrap();
+        let outcome_a = run_pairing_exchange(stream_a, "482913", &identity_a, "laptop-a", || {}, |_phrase| true).unwrap();
         let outcome_b = thread_b.join().unwrap().unwrap();
 
         assert_eq!(outcome_a.peer_id, fingerprint_b);
@@ -129,14 +131,14 @@ mod tests {
         let phrases_b = std::sync::Arc::new(std::sync::Mutex::new(None));
         let phrases_b_clone = phrases_b.clone();
         let thread_b = std::thread::spawn(move || {
-            run_pairing_exchange(stream_b, "111111", &identity_b, "b", |phrase| {
+            run_pairing_exchange(stream_b, "111111", &identity_b, "b", || {}, |phrase| {
                 *phrases_b_clone.lock().unwrap() = Some(phrase.to_string());
                 true
             })
         });
 
         let mut phrase_a = None;
-        run_pairing_exchange(stream_a, "111111", &identity_a, "a", |phrase| {
+        run_pairing_exchange(stream_a, "111111", &identity_a, "a", || {}, |phrase| {
             phrase_a = Some(phrase.to_string());
             true
         })
@@ -154,12 +156,38 @@ mod tests {
         let identity_b = Identity::generate();
 
         let thread_b = std::thread::spawn(move || {
-            run_pairing_exchange(stream_b, "000000", &identity_b, "b", |_| true)
+            run_pairing_exchange(stream_b, "000000", &identity_b, "b", || {}, |_| true)
         });
 
-        let result_a = run_pairing_exchange(stream_a, "999999", &identity_a, "a", |_| true);
+        let result_a = run_pairing_exchange(stream_a, "999999", &identity_a, "a", || {}, |_| true);
         assert!(result_a.is_err());
         let _ = thread_b.join().unwrap();
+    }
+
+    #[test]
+    fn a_peer_that_connects_but_never_speaks_fails_with_an_error_rather_than_hanging() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _silent = std::thread::spawn(move || {
+            let (_s, _) = listener.accept().unwrap();
+            std::thread::sleep(std::time::Duration::from_secs(3));
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(400)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(std::time::Duration::from_millis(400)))
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let result = run_pairing_exchange(stream, "424242", &Identity::generate(), "a", || {}, |_| true);
+        assert!(result.is_err(), "a silent peer must not pair");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the read timeout must bound the wait, not hang"
+        );
     }
 
     #[test]
@@ -169,10 +197,10 @@ mod tests {
         let identity_b = Identity::generate();
 
         let thread_b = std::thread::spawn(move || {
-            run_pairing_exchange(stream_b, "555555", &identity_b, "b", |_| true)
+            run_pairing_exchange(stream_b, "555555", &identity_b, "b", || {}, |_| true)
         });
 
-        let result_a = run_pairing_exchange(stream_a, "555555", &identity_a, "a", |_| false);
+        let result_a = run_pairing_exchange(stream_a, "555555", &identity_a, "a", || {}, |_| false);
         assert!(result_a.is_err(), "declining locally must not yield a peer to add");
 
         let result_b = thread_b.join().unwrap();

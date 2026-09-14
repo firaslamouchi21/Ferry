@@ -54,7 +54,8 @@ function makeTransport(host: HostKind): Transport {
       return new MockTransport();
     default: {
       const proto = window.location.protocol === "https:" ? "wss" : "ws";
-      return new WebSocketTransport(`${proto}://${window.location.host}/ferry-ipc`);
+      const host = window.location.host || window.location.hostname || "localhost:5173";
+      return new WebSocketTransport(`${proto}://${host}/ferry-ipc`);
     }
   }
 }

@@ -16,6 +16,41 @@ use crate::presence::Presence;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 const REDRIVE_INTERVAL: Duration = Duration::from_secs(5);
+const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn usable_peer_address(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => !v4.is_loopback() && !v4.is_link_local() && !v4.is_unspecified(),
+        std::net::IpAddr::V6(v6) => !v6.is_loopback() && !v6.is_unspecified() && (v6.segments()[0] & 0xffc0) != 0xfe80,
+    }
+}
+
+pub fn connect_to_peer(peer: &DiscoveredPeer) -> Result<TcpStream, Vec<String>> {
+    let mut tried = Vec::new();
+    let mut addrs: Vec<std::net::IpAddr> = peer.addresses.iter().copied().filter(usable_peer_address).collect();
+    addrs.sort_by_key(|ip| ip.is_ipv6());
+    for ip in addrs {
+        let sock = std::net::SocketAddr::new(ip, peer.port);
+        match TcpStream::connect_timeout(&sock, PEER_CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => tried.push(format!("{sock} ({err})")),
+        }
+    }
+    let host = format!("{}:{}", peer.host.trim_end_matches('.'), peer.port);
+    use std::net::ToSocketAddrs;
+    if let Ok(resolved) = host.to_socket_addrs() {
+        for sock in resolved {
+            match TcpStream::connect_timeout(&sock, PEER_CONNECT_TIMEOUT) {
+                Ok(stream) => return Ok(stream),
+                Err(err) => tried.push(format!("{sock} via {host} ({err})")),
+            }
+        }
+    } else {
+        tried.push(format!("{host} (did not resolve)"));
+    }
+    Err(tried)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_reappearance_loop(
@@ -92,21 +127,26 @@ fn handle_reappeared_peer(
         return;
     };
     presence.seen(fingerprint);
+    emit(IpcEvent::Changed {
+        resource: IpcResource::Peer,
+        id: Some(fingerprint.clone()),
+    });
 
-    let mut candidates: Vec<String> = peer
-        .addresses
-        .iter()
-        .map(|ip| std::net::SocketAddr::new(*ip, peer.port).to_string())
-        .collect();
-    candidates.push(format!("{}:{}", peer.host.trim_end_matches('.'), peer.port));
-
-    let stream = match candidates.iter().find_map(|addr| TcpStream::connect(addr).ok()) {
-        Some(stream) => stream,
-        None => {
-            eprintln!("ferry-daemon: could not connect to reappeared peer {fingerprint} at any of {candidates:?}");
+    let stream = match connect_to_peer(peer) {
+        Ok(stream) => stream,
+        Err(tried) => {
+            eprintln!("ferry-daemon: could not connect to reappeared peer {fingerprint}: tried {}", tried.join(", "));
             return;
         }
     };
+    if let Err(err) = stream.set_read_timeout(Some(CONNECTION_IDLE_TIMEOUT)) {
+        eprintln!("ferry-daemon: could not set read timeout for {fingerprint}: {err}");
+        return;
+    }
+    if let Err(err) = stream.set_write_timeout(Some(CONNECTION_IDLE_TIMEOUT)) {
+        eprintln!("ferry-daemon: could not set write timeout for {fingerprint}: {err}");
+        return;
+    }
     let raw = match connect_initiator(stream, local_keys, &remote_static, |_| true) {
         Ok(raw) => raw,
         Err(err) => {
@@ -144,6 +184,8 @@ fn handle_reappeared_peer(
                 .iter()
                 .chain(outcome.dropped.iter())
                 .chain(outcome.receipts_sent.iter())
+                .chain(outcome.failed.iter().map(|(item_id, _)| item_id))
+                .chain(outcome.deferred.iter())
             {
                 emit(IpcEvent::Changed {
                     resource: IpcResource::Transfer,
@@ -320,5 +362,51 @@ mod tests {
 
         assert!(peer_has_pending_work(&store, &peer("peer-with-mail")));
         assert!(!peer_has_pending_work(&store, &peer("some-other-peer")));
+    }
+
+    #[test]
+    fn an_unreachable_advertised_address_fails_fast_instead_of_stalling_the_discovery_thread() {
+        let peer = DiscoveredPeer {
+            fullname: "ghost._ferry._tcp.local.".into(),
+            host: "ghost-does-not-resolve.invalid.".into(),
+            addresses: vec!["198.51.100.1".parse().unwrap()],
+            port: 47821,
+            fingerprint: Some("ghost".into()),
+            protocol_version: Some("2".into()),
+        };
+        let started = std::time::Instant::now();
+        let result = connect_to_peer(&peer);
+        assert!(result.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(PEER_CONNECT_TIMEOUT.as_secs() * 2 + 4),
+            "a dead address must be bounded by the connect timeout, not the OS default (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn loopback_and_link_local_addresses_are_never_dialled_and_a_real_one_wins() {
+        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let lan_ip = {
+            let s = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+            s.connect("8.8.8.8:80").ok().and_then(|_| s.local_addr().ok()).map(|a| a.ip())
+        };
+        let Some(lan_ip) = lan_ip.filter(usable_peer_address) else {
+            return;
+        };
+        let peer = DiscoveredPeer {
+            fullname: "self._ferry._tcp.local.".into(),
+            host: "self.local.".into(),
+            addresses: vec!["127.0.0.1".parse().unwrap(), "169.254.10.10".parse().unwrap(), lan_ip],
+            port,
+            fingerprint: Some("self".into()),
+            protocol_version: Some("2".into()),
+        };
+        let accept = std::thread::spawn(move || listener.accept().map(|(_, from)| from.ip()));
+        let stream = connect_to_peer(&peer).expect("the LAN address should connect");
+        drop(stream);
+        let from = accept.join().unwrap().unwrap();
+        assert!(!from.is_loopback(), "must have connected over the real interface, got {from}");
     }
 }

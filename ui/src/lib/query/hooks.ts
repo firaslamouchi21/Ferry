@@ -22,7 +22,7 @@ export function useIdentity() {
 
 export function useRoster() {
   const ferry = useFerryClient();
-  return useQuery({ queryKey: queryKeys.roster, queryFn: () => ferry.rosterList() });
+  return useQuery({ queryKey: queryKeys.roster, queryFn: () => ferry.rosterList(), refetchInterval: 15_000 });
 }
 
 export function useInbox() {
