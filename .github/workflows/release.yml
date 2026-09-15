@@ -89,19 +89,23 @@ jobs:
         if: matrix.os != 'windows-latest'
         shell: bash
         run: |
-          shopt -s nullglob
-          mkdir -p pkg
-          chmod +x "dist/ferry-${{ matrix.name }}" "dist/ferry-daemon-${{ matrix.name }}"
-          cd dist
-          files=("ferry-${{ matrix.name }}" "ferry-daemon-${{ matrix.name }}" *.asc)
-          tar -czf "../pkg/ferry-${{ matrix.name }}.tar.gz" "${files[@]}"
+          mkdir -p pkg stage
+          cp "dist/ferry-${{ matrix.name }}" stage/ferry
+          cp "dist/ferry-daemon-${{ matrix.name }}" stage/ferry-daemon
+          chmod +x stage/ferry stage/ferry-daemon
+          [ -f "dist/ferry-${{ matrix.name }}.asc" ] && cp "dist/ferry-${{ matrix.name }}.asc" stage/ferry.asc
+          [ -f "dist/ferry-daemon-${{ matrix.name }}.asc" ] && cp "dist/ferry-daemon-${{ matrix.name }}.asc" stage/ferry-daemon.asc
+          cd stage
+          tar -czf "../pkg/ferry-${{ matrix.name }}.tar.gz" *
 
       - name: Package a ready-to-run archive (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path pkg | Out-Null
-          Compress-Archive -Path "dist/ferry-${{ matrix.name }}.exe","dist/ferry-daemon-${{ matrix.name }}.exe" -DestinationPath "pkg/ferry-${{ matrix.name }}.zip"
+          New-Item -ItemType Directory -Force -Path pkg,stage | Out-Null
+          Copy-Item "dist/ferry-${{ matrix.name }}.exe" "stage/ferry.exe"
+          Copy-Item "dist/ferry-daemon-${{ matrix.name }}.exe" "stage/ferry-daemon.exe"
+          Compress-Archive -Path "stage/ferry.exe","stage/ferry-daemon.exe" -DestinationPath "pkg/ferry-${{ matrix.name }}.zip"
 
       - name: Archive checksum
         shell: bash
