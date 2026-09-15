@@ -22,6 +22,7 @@ jobs:
         run: |
           docker run -d --name ferry-smoke -p 15170:5170 -e FERRY_IDENTITY_PASSPHRASE=ci-smoke-test ferry:ci
           timeout 30 bash -c 'until curl -sf http://localhost:15170/ >/dev/null; do sleep 1; done'
+          timeout 30 bash -c 'until docker exec ferry-smoke ferry status >/dev/null 2>&1; do sleep 1; done'
           docker exec ferry-smoke ferry status
           docker stop ferry-smoke
 
