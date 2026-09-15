@@ -86,9 +86,10 @@ log knows that something happened and when, and nothing about what it was.
 Signed installers and a published extension aren't wired up yet — for now you build those two
 from source (see below). Once there are releases:
 
-- **Command line** — grab the `ferry` and `ferry-daemon` binaries for your platform from the
-  releases page and drop them on your `PATH`. Or build them yourself: `./dev.sh` for
-  CLI+UI together, or see [Building from source](#building-from-source) below.
+- **Command line** — download the archive for your platform from the releases page
+  (`.tar.gz` on Linux/macOS, `.zip` on Windows), extract it, and drop `ferry`/`ferry-daemon`
+  on your `PATH`. Or build them yourself: `./dev.sh` for CLI+UI together, or see
+  [Building from source](#building-from-source) below.
 - **Docker** — `docker pull ghcr.io/firaslamouchi21/ferry` (also mirrored on Docker Hub once
   published). No Rust/Node toolchain needed; see [docker/README.md](docker/README.md).
 - **VS Code** — install the Ferry extension. It brings its own daemon, so there's nothing else
