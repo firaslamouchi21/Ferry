@@ -43,7 +43,8 @@ jobs:
         id: tags
         run: |
           version="${GITHUB_REF_NAME#v}"
-          tags="ghcr.io/${{ github.repository }}:${version},ghcr.io/${{ github.repository }}:latest"
+          repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          tags="ghcr.io/${repo_lower}:${version},ghcr.io/${repo_lower}:latest"
           if [ -n "${{ vars.DOCKERHUB_USERNAME }}" ]; then
             tags="$tags,${{ vars.DOCKERHUB_USERNAME }}/ferry:${version},${{ vars.DOCKERHUB_USERNAME }}/ferry:latest"
           fi

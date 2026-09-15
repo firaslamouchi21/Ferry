@@ -307,6 +307,7 @@ enum SentCommand {
 
 fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
     let has_override = SOCKET_OVERRIDE.get().and_then(|o| o.clone()).is_some();
+    let is_status_probe = matches!(request, IpcRequest::Status);
     let socket_path = match SOCKET_OVERRIDE.get().and_then(|o| o.clone()) {
         Some(path) => path,
         None => {
@@ -317,7 +318,7 @@ fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
 
     let mut stream = match ferry_net::local_ipc::connect(&socket_path) {
         Ok(stream) => stream,
-        Err(source) if has_override => {
+        Err(source) if has_override || is_status_probe => {
             return Err(format!(
                 "unreachable: could not connect to the ferry daemon at {} — is it running? ({source})",
                 socket_path.display()
