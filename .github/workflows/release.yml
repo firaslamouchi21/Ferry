@@ -85,6 +85,35 @@ jobs:
           name: ferry-${{ matrix.name }}
           path: dist/*
 
+      - name: Package a ready-to-run archive (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          mkdir -p pkg
+          chmod +x "dist/ferry-${{ matrix.name }}" "dist/ferry-daemon-${{ matrix.name }}"
+          cd dist
+          files=("ferry-${{ matrix.name }}" "ferry-daemon-${{ matrix.name }}" *.asc)
+          tar -czf "../pkg/ferry-${{ matrix.name }}.tar.gz" "${files[@]}"
+
+      - name: Package a ready-to-run archive (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          Compress-Archive -Path "dist/ferry-${{ matrix.name }}.exe","dist/ferry-daemon-${{ matrix.name }}.exe" -DestinationPath "pkg/ferry-${{ matrix.name }}.zip"
+
+      - name: Archive checksum
+        shell: bash
+        run: |
+          cd pkg
+          if command -v sha256sum >/dev/null; then sha256sum ferry-* > "SHA256SUMS-${{ matrix.name }}.txt"; else shasum -a 256 ferry-* > "SHA256SUMS-${{ matrix.name }}.txt"; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferry-release-${{ matrix.name }}
+          path: pkg/*
+
   vsix:
     name: package .vsix (${{ matrix.vsce_target }})
     needs: binaries
@@ -168,6 +197,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: ferry-release-*
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ferry-vsix-*
           path: artifacts
       - name: Assemble the release directory
         run: |
