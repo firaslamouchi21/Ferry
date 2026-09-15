@@ -7,45 +7,68 @@ export class TauriTransport implements Transport {
   private phaseListeners = new Set<(phase: ConnectionPhase) => void>();
   private currentPhase: ConnectionPhase = "connecting";
   private unlisten: (() => void) | null = null;
+  private unlistenClosed: (() => void) | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private stopped = false;
+  private generation = 0;
 
   phase(): ConnectionPhase {
     return this.currentPhase;
   }
 
   async start(): Promise<void> {
-    this.stopped = false;
-    this.unlisten = await listen<IpcEvent>("ferry://event", (e) => {
-      for (const l of this.eventListeners) l(e.payload);
-    });
-    void this.attempt();
+    const gen = ++this.generation;
+    try {
+      const unlisten = await listen<IpcEvent>("ferry://event", (e) => {
+        if (gen !== this.generation) return;
+        for (const l of this.eventListeners) l(e.payload);
+      });
+      const unlistenClosed = await listen("ferry://subscribe-closed", () => {
+        if (gen !== this.generation) return;
+        this.setPhase("disconnected");
+        this.retryTimer = setTimeout(() => void this.attempt(gen), 1500);
+      });
+      if (gen !== this.generation) {
+        unlisten();
+        unlistenClosed();
+        return;
+      }
+      this.unlisten = unlisten;
+      this.unlistenClosed = unlistenClosed;
+      void this.attempt(gen);
+    } catch {
+      if (gen !== this.generation) return;
+      this.setPhase("disconnected");
+      this.retryTimer = setTimeout(() => void this.start(), 1500);
+    }
   }
 
-  private async attempt(): Promise<void> {
-    if (this.stopped) return;
+  private async attempt(gen: number): Promise<void> {
+    if (gen !== this.generation) return;
     try {
       await invoke("ipc_subscribe");
+      if (gen !== this.generation) return;
       this.setPhase("connected");
     } catch {
+      if (gen !== this.generation) return;
       this.setPhase("disconnected");
-      if (!this.stopped) {
-        this.retryTimer = setTimeout(() => void this.attempt(), 1500);
-      }
+      this.retryTimer = setTimeout(() => void this.attempt(gen), 1500);
     }
   }
 
   stop(): void {
-    this.stopped = true;
+    this.generation++;
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     this.unlisten?.();
     this.unlisten = null;
+    this.unlistenClosed?.();
+    this.unlistenClosed = null;
   }
 
   retryNow(): void {
     if (this.retryTimer) clearTimeout(this.retryTimer);
-    void this.attempt();
+    this.retryTimer = null;
+    void this.attempt(this.generation);
   }
 
   canStartDaemon(): boolean {

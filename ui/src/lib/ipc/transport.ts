@@ -164,6 +164,8 @@ export class WebSocketTransport implements Transport {
           this.pending.delete(msg.id);
           this.rejecters.delete(msg.id);
         }
+      } else if (msg.kind === "subscribe_closed") {
+        ws.close();
       }
     };
   }

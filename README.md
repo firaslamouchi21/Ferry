@@ -83,11 +83,14 @@ log knows that something happened and when, and nothing about what it was.
 
 ## Getting it
 
-Installers aren't wired up yet — for now you build it yourself (see below). Once there are
-releases:
+Signed installers and a published extension aren't wired up yet — for now you build those two
+from source (see below). Once there are releases:
 
 - **Command line** — grab the `ferry` and `ferry-daemon` binaries for your platform from the
-  releases page and drop them on your `PATH`.
+  releases page and drop them on your `PATH`. Or build them yourself: `./dev.sh` for
+  CLI+UI together, or see [Building from source](#building-from-source) below.
+- **Docker** — `docker pull ghcr.io/firaslamouchi21/ferry` (also mirrored on Docker Hub once
+  published). No Rust/Node toolchain needed; see [docker/README.md](docker/README.md).
 - **VS Code** — install the Ferry extension. It brings its own daemon, so there's nothing else
   to set up.
 - **Desktop app** — a signed installer for macOS, Windows, and Linux.
@@ -136,11 +139,24 @@ deploy it, or import a roster somebody signed for you with `ferry roster import`
 
 You'll need a recent stable Rust toolchain and `pnpm`.
 
+To just run the CLI and UI locally against each other, one command:
+
 ```sh
-cargo build --release -p ferry-daemon -p ferry     # the binaries
+./dev.sh
+```
+
+It builds the daemon + CLI, installs the JS dependencies, and starts the UI dev server at
+`http://localhost:5173` — open that, and click **Start daemon** if it isn't already running.
+No Docker, no separate terminal juggling. (Windows: run the three steps inside `dev.sh`
+yourself, or use WSL.)
+
+For everything else — building release binaries, running the full test suite:
+
+```sh
+cargo build --release -p ferry-daemon -p ferry-cli # the binaries
 cargo test --workspace                             # the whole test suite
 bash testing/local-two-peer.sh                     # two real daemons on one machine
-pnpm install && pnpm --filter @ferry/ui build      # the shared UI
+pnpm install && pnpm --filter @ferry/ui build      # the shared UI, as a static bundle
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) walks through the layout and the rules a change has to

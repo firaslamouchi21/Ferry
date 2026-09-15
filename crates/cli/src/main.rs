@@ -306,6 +306,8 @@ enum SentCommand {
 }
 
 fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
+    let has_override = SOCKET_OVERRIDE.get().and_then(|o| o.clone()).is_some();
+    let is_status_probe = matches!(request, IpcRequest::Status);
     let socket_path = match SOCKET_OVERRIDE.get().and_then(|o| o.clone()) {
         Some(path) => path,
         None => {
@@ -314,12 +316,24 @@ fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
         }
     };
 
-    let mut stream = ferry_net::local_ipc::connect(&socket_path).map_err(|source| {
-        format!(
-            "unreachable: could not connect to the ferry daemon at {} — is it running? ({source})",
-            socket_path.display()
-        )
-    })?;
+    let mut stream = match ferry_net::local_ipc::connect(&socket_path) {
+        Ok(stream) => stream,
+        Err(source) if has_override || is_status_probe => {
+            return Err(format!(
+                "unreachable: could not connect to the ferry daemon at {} — is it running? ({source})",
+                socket_path.display()
+            ));
+        }
+        Err(_) => {
+            start_daemon_if_needed()?;
+            ferry_net::local_ipc::connect(&socket_path).map_err(|source| {
+                format!(
+                    "unreachable: could not connect to the ferry daemon at {} — is it running? ({source})",
+                    socket_path.display()
+                )
+            })?
+        }
+    };
 
     let envelope = IpcEnvelope {
         ipc_protocol_version: IPC_PROTOCOL_VERSION,
@@ -414,10 +428,14 @@ fn cmd_daemon_run() -> Result<(), String> {
     }
 }
 
-fn cmd_daemon_start() -> Result<(), String> {
+enum DaemonStartOutcome {
+    AlreadyRunning,
+    Started { pid: u32, log_path: PathBuf },
+}
+
+fn start_daemon_if_needed() -> Result<DaemonStartOutcome, String> {
     if daemon_is_running() {
-        println!("ferry-daemon is already running");
-        return Ok(());
+        return Ok(DaemonStartOutcome::AlreadyRunning);
     }
 
     let data_dir = ferry_core::config::default_data_dir();
@@ -436,8 +454,7 @@ fn cmd_daemon_start() -> Result<(), String> {
 
     for _ in 0..50 {
         if daemon_is_running() {
-            println!("ferry-daemon started (pid {pid}), logging to {}", log_path.display());
-            return Ok(());
+            return Ok(DaemonStartOutcome::Started { pid, log_path });
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -445,6 +462,16 @@ fn cmd_daemon_start() -> Result<(), String> {
         "ferry-daemon (pid {pid}) did not accept a connection within 5s — see {}",
         log_path.display()
     ))
+}
+
+fn cmd_daemon_start() -> Result<(), String> {
+    match start_daemon_if_needed()? {
+        DaemonStartOutcome::AlreadyRunning => println!("ferry-daemon is already running"),
+        DaemonStartOutcome::Started { pid, log_path } => {
+            println!("ferry-daemon started (pid {pid}), logging to {}", log_path.display())
+        }
+    }
+    Ok(())
 }
 
 fn cmd_daemon_stop() -> Result<(), String> {
@@ -1160,10 +1187,14 @@ fn cmd_activity(limit: u32, before_millis: Option<i64>) -> Result<(), String> {
 }
 
 fn cmd_watch() -> Result<(), String> {
+    let has_override = SOCKET_OVERRIDE.get().and_then(|o| o.clone()).is_some();
     let socket_path = match SOCKET_OVERRIDE.get().and_then(|o| o.clone()) {
         Some(path) => path,
         None => ferry_core::config::ipc_socket_path(&ferry_core::config::default_data_dir()),
     };
+    if !has_override && ferry_net::local_ipc::connect(&socket_path).is_err() {
+        start_daemon_if_needed()?;
+    }
     let mut stream = ferry_net::local_ipc::connect(&socket_path)
         .map_err(|e| format!("unreachable: could not connect to the ferry daemon: {e}"))?;
     let envelope = IpcEnvelope {

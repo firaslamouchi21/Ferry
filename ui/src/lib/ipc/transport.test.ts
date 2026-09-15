@@ -175,4 +175,16 @@ describe("WebSocketTransport", () => {
     socket.deliver({ kind: "event", data: { event: "changed", params: { resource: "roster", id: null } } });
     expect(seen).toHaveLength(1);
   });
+
+  it("reconnects when the bridge reports the daemon's subscription socket closed", () => {
+    const { transport, socket } = connected();
+    const seen: ConnectionPhase[] = [];
+    transport.onPhase((p) => seen.push(p));
+
+    socket.deliver({ kind: "subscribe_closed" });
+
+    expect(seen).toEqual(["disconnected"]);
+    vi.advanceTimersByTime(500);
+    expect(FakeWebSocket.instances, "a fresh connection must be opened, not left idle").toHaveLength(2);
+  });
 });

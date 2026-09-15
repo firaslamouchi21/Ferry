@@ -94,8 +94,10 @@ fn ipc_request(envelope: Value) -> Result<Value, String> {
 #[tauri::command]
 fn ipc_subscribe(app: tauri::AppHandle, state: tauri::State<DaemonSocket>) -> Result<(), String> {
     let mut guard = state.0.lock().unwrap();
-    if guard.is_some() {
-        return Ok(());
+    if let Some(handle) = guard.as_ref() {
+        if !handle.is_finished() {
+            return Ok(());
+        }
     }
     let mut stream = local_ipc::connect(&socket_path()).map_err(|e| e.to_string())?;
     let envelope = serde_json::json!({
@@ -110,6 +112,7 @@ fn ipc_subscribe(app: tauri::AppHandle, state: tauri::State<DaemonSocket>) -> Re
                 let _ = app.emit("ferry://event", value);
             }
         }
+        let _ = app.emit("ferry://subscribe-closed", ());
     });
     *guard = Some(handle);
     Ok(())

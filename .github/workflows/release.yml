@@ -21,7 +21,6 @@ jobs:
         include:
           - { os: ubuntu-latest, name: linux-x86_64, target: x86_64-unknown-linux-gnu }
           - { os: macos-latest, name: macos-aarch64, target: aarch64-apple-darwin }
-          - { os: macos-13, name: macos-x86_64, target: x86_64-apple-darwin }
           - { os: windows-latest, name: windows-x86_64, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +29,7 @@ jobs:
       - run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build release binaries
-        run: cargo build --release --locked --target ${{ matrix.target }} -p ferry-daemon -p ferry
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ferry-daemon -p ferry-cli
 
       - name: Smoke-run the freshly built binaries
         shell: bash
@@ -96,7 +95,6 @@ jobs:
         include:
           - { vsce_target: linux-x64, daemon_artifact: ferry-linux-x86_64, daemon_file: ferry-daemon-linux-x86_64 }
           - { vsce_target: darwin-arm64, daemon_artifact: ferry-macos-aarch64, daemon_file: ferry-daemon-macos-aarch64 }
-          - { vsce_target: darwin-x64, daemon_artifact: ferry-macos-x86_64, daemon_file: ferry-daemon-macos-x86_64 }
           - { vsce_target: win32-x64, daemon_artifact: ferry-windows-x86_64, daemon_file: ferry-daemon-windows-x86_64.exe }
     steps:
       - uses: actions/checkout@v4
