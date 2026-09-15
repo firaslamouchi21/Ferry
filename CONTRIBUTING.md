@@ -53,12 +53,14 @@ daemon / cli / desktop  →  core  →  net / store / crypto  →  proto
 - **`ext/vscode/` and `desktop/`** are thin shells around that app.
 
 ## minimal comments
-
 keep comments minimal unless there's a genuine reason a future
 reader couldn't work it out from the code itself (a subtle safety invariant, a workaround for
 someone else's bug)
-
 ## Getting a change in
+
+Run `./dev.sh` from the repo root to build the daemon + CLI and open the UI against them at
+`http://localhost:5173` — the fastest way to see a change while you're working on it, no Docker
+or separate daemon-management step needed.
 
 - **A new feature** roughly goes: decide the state model, add the `proto` type, write the
   migration, put the logic in `core`, decide what happens offline, add the policy check, wire
@@ -69,7 +71,6 @@ someone else's bug)
 - **A protocol change** means bumping the protocol version, writing down what happens when an
   old version meets a new one, and adding a harness case for exactly that. Changing the wire
   format without a version bump is a bug.
-
 ## Tests
 
 The goal is simple: **if CI is green, Ferry works.** Not "it compiled" — it works. So:

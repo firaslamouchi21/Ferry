@@ -2,6 +2,11 @@ export const LOCALES = ["en", "fr", "de", "es", "pt", "ja", "zh", "ar"] as const
 export type Locale = (typeof LOCALES)[number];
 export const DEFAULT_LOCALE: Locale = "en";
 
+// es/pt/ja/zh/ar catalogs stay in the repo (machine-translated, never native-reviewed)
+// but are dormant: not selectable in the UI and not reachable via locale detection.
+// Only the shipped ACTIVE_LOCALES are usable. Re-activate by adding one back here.
+export const ACTIVE_LOCALES = ["en", "fr", "de"] as const satisfies readonly Locale[];
+
 export const LOCALE_LABELS: Record<Locale, string> = {
   en: "English",
   fr: "Français",
@@ -25,10 +30,14 @@ export function isLocale(value: unknown): value is Locale {
   return typeof value === "string" && (LOCALES as readonly string[]).includes(value);
 }
 
+export function isActiveLocale(value: unknown): value is Locale {
+  return typeof value === "string" && (ACTIVE_LOCALES as readonly string[]).includes(value);
+}
+
 export function detectLocale(): Locale {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (isLocale(saved)) return saved;
+    if (isActiveLocale(saved)) return saved;
   } catch {
     void 0;
   }
@@ -38,7 +47,7 @@ export function detectLocale(): Locale {
       : [];
   for (const tag of candidates) {
     const base = tag?.toLowerCase().split("-")[0];
-    if (isLocale(base)) return base;
+    if (isActiveLocale(base)) return base;
   }
   return DEFAULT_LOCALE;
 }

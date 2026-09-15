@@ -1,8 +1,11 @@
 target
 .git
+node_modules
 ui/node_modules
 desktop/node_modules
 ext/node_modules
+ui/dist
+desktop/dist
 **/*.dc.html
 docs/private
 FINISH_LINE.md

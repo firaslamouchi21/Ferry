@@ -9,7 +9,16 @@ import { zh } from "./zh";
 import { ar } from "./ar";
 import { DEFAULT_LOCALE, detectLocale, localeDirection, persistLocale, type Locale } from "./locales";
 
-export { LOCALES, LOCALE_LABELS, DEFAULT_LOCALE, isLocale, detectLocale, localeDirection } from "./locales";
+export {
+  LOCALES,
+  ACTIVE_LOCALES,
+  LOCALE_LABELS,
+  DEFAULT_LOCALE,
+  isLocale,
+  isActiveLocale,
+  detectLocale,
+  localeDirection,
+} from "./locales";
 export type { Locale } from "./locales";
 export type { Catalog } from "./en";
 

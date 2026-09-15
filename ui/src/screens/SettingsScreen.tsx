@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Power, RotateCw } from "lucide-react";
 import { useDaemonStatus, useFerry, useIdentity } from "@/lib/query";
 import { Button, ConfirmDialog, CopyButton, Fingerprint } from "@/components";
-import { LOCALES, LOCALE_LABELS, useI18n } from "@/lib/i18n";
+import { ACTIVE_LOCALES, LOCALE_LABELS, useI18n } from "@/lib/i18n";
 import { THEME_PREFS, useTheme } from "@/lib/theme";
 import { Async, ScreenHeader } from "./parts";
 
@@ -49,9 +49,9 @@ export function SettingsScreen() {
                   <select
                     className="text-input"
                     value={locale}
-                    onChange={(e) => setLocale(e.target.value as (typeof LOCALES)[number])}
+                    onChange={(e) => setLocale(e.target.value as (typeof ACTIVE_LOCALES)[number])}
                   >
-                    {LOCALES.map((l) => (
+                    {ACTIVE_LOCALES.map((l) => (
                       <option key={l} value={l}>
                         {LOCALE_LABELS[l]}
                       </option>

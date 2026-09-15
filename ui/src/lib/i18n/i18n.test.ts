@@ -95,8 +95,28 @@ describe("locale detection", () => {
     } catch {
       void 0;
     }
+    vi.stubGlobal("navigator", { language: "de-DE", languages: ["de-DE"] });
+    expect(detectLocale()).toBe("de");
+  });
+
+  it("falls back to English for a dormant locale's navigator tag", () => {
+    try {
+      localStorage.clear();
+    } catch {
+      void 0;
+    }
     vi.stubGlobal("navigator", { language: "pt-BR", languages: ["pt-BR"] });
-    expect(detectLocale()).toBe("pt");
+    expect(detectLocale()).toBe("en");
+  });
+
+  it("falls back to English when the persisted locale is dormant", () => {
+    try {
+      localStorage.clear();
+    } catch {
+      void 0;
+    }
+    persistLocale("es");
+    expect(detectLocale()).toBe("en");
   });
 
   it("defaults to English for an unsupported navigator language", () => {

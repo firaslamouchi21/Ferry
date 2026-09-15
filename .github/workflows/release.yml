@@ -30,7 +30,7 @@ jobs:
       - run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build release binaries
-        run: cargo build --release --locked --target ${{ matrix.target }} -p ferry-daemon -p ferry
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ferry-daemon -p ferry-cli
 
       - name: Smoke-run the freshly built binaries
         shell: bash
