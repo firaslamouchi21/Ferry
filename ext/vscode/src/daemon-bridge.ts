@@ -28,7 +28,19 @@ export class DaemonBridge {
     private context: vscode.ExtensionContext,
   ) {}
 
-  handle(message: { kind?: string; envelope?: unknown }): void {
+  handle(message: { kind?: string; envelope?: unknown; name?: string; path?: string; content_base64?: string }): void {
+    if (message.kind === "pick-file") {
+      void this.pickFile();
+      return;
+    }
+    if (message.kind === "pick-save-path") {
+      void this.pickSavePath(message.name ?? "ferry-item");
+      return;
+    }
+    if (message.kind === "save-file" && message.path && typeof message.content_base64 === "string") {
+      void this.saveFile(message.path, message.content_base64);
+      return;
+    }
     if (message.kind === "start") {
       this.openSubscription();
       this.post({ kind: "phase", phase: "connecting" });
@@ -45,6 +57,27 @@ export class DaemonBridge {
     }
     if (message.kind === "request" && message.envelope) {
       this.request(message.envelope as { request_id?: string });
+    }
+  }
+
+  private async pickFile(): Promise<void> {
+    const picked = await vscode.window.showOpenDialog({ canSelectMany: false, canSelectFolders: false });
+    const uri = picked?.[0];
+    this.post({ kind: "pick-file-result", file: uri ? { path: uri.fsPath, name: path.basename(uri.fsPath) } : null });
+  }
+
+  private async pickSavePath(name: string): Promise<void> {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri ?? vscode.Uri.file(os.homedir());
+    const uri = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.joinPath(folder, name) });
+    this.post({ kind: "pick-file-result", file: uri ? { path: uri.fsPath, name: path.basename(uri.fsPath) } : null });
+  }
+
+  private async saveFile(target: string, contentBase64: string): Promise<void> {
+    try {
+      await vscode.workspace.fs.writeFile(vscode.Uri.file(target), Buffer.from(contentBase64, "base64"));
+      this.post({ kind: "save-file-result", ok: true });
+    } catch (err) {
+      this.post({ kind: "save-file-result", ok: false, message: String((err as Error).message ?? err) });
     }
   }
 

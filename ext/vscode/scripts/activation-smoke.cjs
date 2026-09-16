@@ -2,7 +2,7 @@ const Module = require("node:module");
 const path = require("node:path");
 const assert = require("node:assert");
 
-const registered = { commands: new Set(), treeViews: new Set(), statusBars: 0 };
+const registered = { commands: new Set(), webviewViews: new Set(), statusBars: 0 };
 const disposable = { dispose() {} };
 
 class EventEmitterStub {
@@ -21,25 +21,11 @@ class EventEmitterStub {
   }
 }
 
-class TreeItemStub {
-  constructor(label, collapsibleState) {
-    this.label = label;
-    this.collapsibleState = collapsibleState;
-  }
-}
-
 const vscodeStub = {
   StatusBarAlignment: { Left: 1, Right: 2 },
   ViewColumn: { Active: -1 },
   ProgressLocation: { Window: 10, Notification: 15 },
   EventEmitter: EventEmitterStub,
-  TreeItem: TreeItemStub,
-  TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
-  ThemeIcon: class {
-    constructor(id) {
-      this.id = id;
-    }
-  },
   Uri: {
     joinPath: (base, ...parts) => ({ fsPath: path.join(base.fsPath, ...parts), path: path.join(base.fsPath, ...parts) }),
     file: (p) => ({ fsPath: p, path: p }),
@@ -49,8 +35,8 @@ const vscodeStub = {
       registered.statusBars += 1;
       return { text: "", command: "", show() {}, hide() {}, dispose() {} };
     },
-    registerTreeDataProvider: (id) => {
-      registered.treeViews.add(id);
+    registerWebviewViewProvider: (id) => {
+      registered.webviewViews.add(id);
       return disposable;
     },
     createWebviewPanel: () => ({
@@ -102,14 +88,14 @@ Promise.resolve(ext.activate(context)).then(() => {
   const expectedCommands = require("../package.json").contributes.commands.map((c) => c.command);
   const missing = expectedCommands.filter((c) => !registered.commands.has(c));
   assert.deepStrictEqual(missing, [], `activate() did not register: ${missing.join(", ")}`);
-  assert.ok(registered.treeViews.has("ferryPeers"), "the ferryPeers tree view was not registered");
+  assert.ok(registered.webviewViews.has("ferryMain"), "the ferryMain webview view was not registered");
   assert.ok(registered.statusBars >= 1, "no status bar item was created");
   assert.ok(context.subscriptions.length >= expectedCommands.length, "disposables were not tracked on the context");
 
   if (typeof ext.deactivate === "function") ext.deactivate();
 
   console.log(
-    `activation smoke OK — ${registered.commands.size} commands, tree view + status bar registered, no throw`,
+    `activation smoke OK — ${registered.commands.size} commands, sidebar webview + status bar registered, no throw`,
   );
   process.exit(0);
 }).catch((err) => {

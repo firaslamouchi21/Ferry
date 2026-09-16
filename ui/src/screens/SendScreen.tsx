@@ -1,10 +1,21 @@
 import { useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, FileText, KeyRound, MessageSquare, UploadCloud } from "lucide-react";
-import { useRoster, useSend, useSendInline } from "@/lib/query";
+import { useFerryClient, useRoster, useSend, useSendInline } from "@/lib/query";
 import { Button, Field, Toggle } from "@/components";
-import { encodeBase64 } from "@/lib/format";
-import type { ItemKind } from "@/lib/ipc";
+import { encodeBase64, encodeBase64Bytes } from "@/lib/format";
+import type { ItemKind, PickedFile } from "@/lib/ipc";
+
+const INLINE_FILE_LIMIT_BYTES = 48 * 1024 * 1024;
+
+function readFileBytes(file: File): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(new Uint8Array(reader.result as ArrayBuffer));
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsArrayBuffer(file);
+  });
+}
 import { ScreenHeader } from "./parts";
 import { SecretComposer } from "./SecretComposer";
 import { useT } from "@/lib/i18n";
@@ -14,6 +25,7 @@ type Mode = "file" | "secret" | "message";
 export function SendScreen() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
+  const client = useFerryClient();
   const roster = useRoster();
   const send = useSend();
   const sendInline = useSendInline();
@@ -29,7 +41,24 @@ export function SendScreen() {
   const peers = roster.data ?? [];
   const [peerId, setPeerId] = useState(params.get("peer") ?? "");
   const selectedPeer = peers.find((p) => p.peer_id === peerId) ?? peers[0];
+  const hostPath = params.get("path");
+  const [picked, setPicked] = useState<PickedFile | null>(
+    hostPath ? { path: hostPath, name: hostPath.split(/[\\/]/).pop() ?? hostPath } : null,
+  );
   const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const fileName = picked?.name ?? file?.name ?? null;
+
+  async function chooseFile(input: HTMLInputElement) {
+    setFileError(null);
+    const fromHost = await client.pickFile();
+    if (fromHost) {
+      setPicked(fromHost);
+      setFile(null);
+      return;
+    }
+    input.click();
+  }
   const [message, setMessage] = useState("");
   const [ttlHours, setTtlHours] = useState(24);
   const [burn, setBurn] = useState(false);
@@ -48,7 +77,7 @@ export function SendScreen() {
         : "—",
       payload:
         mode === "file"
-          ? file?.name ?? t("send.payloadFile")
+          ? fileName ?? t("send.payloadFile")
           : mode === "message"
             ? t("send.payloadMessage")
             : t("send.payloadSecret"),
@@ -56,19 +85,42 @@ export function SendScreen() {
       burn: burn ? t("common.yes") : t("common.no"),
       notify: notify ? t("common.yes") : t("common.no"),
     }),
-    [selectedPeer, mode, file, ttlHours, burn, notify, t],
+    [selectedPeer, mode, fileName, ttlHours, burn, notify, t],
   );
 
   async function execute() {
     if (!effectivePeerId) return;
     const ttl_secs = Math.max(60, Math.round(ttlHours * 3600));
     if (mode === "file") {
+      if (picked) {
+        await send.mutateAsync({
+          peer_id: effectivePeerId,
+          source_path: picked.path,
+          name: picked.name,
+          ttl_secs,
+          is_burn_after_read: burn,
+          notify_on_open: notify,
+        });
+        navigate("/sent");
+        return;
+      }
       if (!file) return;
-      const path = (file as File & { path?: string }).path ?? file.name;
-      await send.mutateAsync({
+      if (file.size > INLINE_FILE_LIMIT_BYTES) {
+        setFileError(t("send.tooLarge", { max: Math.floor(INLINE_FILE_LIMIT_BYTES / (1024 * 1024)) }));
+        return;
+      }
+      let bytes: Uint8Array;
+      try {
+        bytes = await readFileBytes(file);
+      } catch {
+        setFileError(t("send.readFailed"));
+        return;
+      }
+      await sendInline.mutateAsync({
         peer_id: effectivePeerId,
-        source_path: path,
         name: file.name,
+        kind: "file" as ItemKind,
+        content_base64: encodeBase64Bytes(bytes),
         ttl_secs,
         is_burn_after_read: burn,
         notify_on_open: notify,
@@ -129,15 +181,26 @@ export function SendScreen() {
 
           {mode === "file" ? (
             <Field label={t("send.payload")}>
-              <label className="dropzone">
+              <label
+                className="dropzone"
+                onClick={(e) => {
+                  e.preventDefault();
+                  const input = e.currentTarget.querySelector("input");
+                  if (input) void chooseFile(input);
+                }}
+              >
                 <UploadCloud size={20} />
-                <span>{file ? file.name : t("send.chooseFile")}</span>
+                <span>{fileName ?? t("send.chooseFile")}</span>
                 <input
                   type="file"
                   hidden
-                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  onChange={(e) => {
+                    setPicked(null);
+                    setFile(e.target.files?.[0] ?? null);
+                  }}
                 />
               </label>
+              {fileError ? <p className="form-error mono">{fileError}</p> : null}
             </Field>
           ) : (
             <Field label={t("send.message")} hint={t("send.messageHint")}>

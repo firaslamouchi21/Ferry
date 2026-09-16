@@ -1,4 +1,4 @@
-import type { ConnectionPhase, Transport } from "./transport";
+import { downloadBytes, type ConnectionPhase, type PickedFile, type Transport } from "./transport";
 import type {
   InboxItemView,
   IpcEnvelope,
@@ -273,6 +273,14 @@ export class MockTransport implements Transport {
   }
 
   async startDaemon() {}
+
+  pickFile(): Promise<PickedFile | null> {
+    return Promise.resolve(null);
+  }
+
+  async saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean> {
+    return downloadBytes(name, await produce());
+  }
 
   emit(event: IpcEvent) {
     for (const listener of this.eventListeners) listener(event);

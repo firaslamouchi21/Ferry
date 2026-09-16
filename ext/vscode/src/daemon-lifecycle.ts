@@ -36,8 +36,15 @@ export async function startDaemon(
   if (await daemonReachable(socketPath)) return { started: false, alreadyRunning: true };
 
   const bin = resolveDaemonBin(context);
-  if (path.isAbsolute(bin) && !fs.existsSync(bin)) {
-    throw new Error(`ferry-daemon not found at ${bin}`);
+  if (path.isAbsolute(bin)) {
+    if (!fs.existsSync(bin)) throw new Error(`ferry-daemon not found at ${bin}`);
+    if (process.platform !== "win32") {
+      try {
+        fs.accessSync(bin, fs.constants.X_OK);
+      } catch {
+        fs.chmodSync(bin, 0o755);
+      }
+    }
   }
 
   const logPath = path.join(os.tmpdir(), "ferry-vscode-daemon.log");
@@ -49,8 +56,13 @@ export async function startDaemon(
     throw new Error(`could not start ${bin}: ${(err as Error).message ?? err}`);
   }
   child.unref();
+  let spawnError: Error | null = null;
+  child.on("error", (err) => {
+    spawnError = err;
+  });
 
   for (let i = 0; i < 50; i += 1) {
+    if (spawnError) throw new Error(`could not start ${bin}: ${(spawnError as Error).message}`);
     if (await daemonReachable(socketPath)) return { started: true, pid: child.pid };
     await new Promise((r) => setTimeout(r, 100));
   }

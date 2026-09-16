@@ -62,3 +62,4 @@ __pycache__/
 *.vsix
 
 #test
+desktop/src-tauri/binaries/

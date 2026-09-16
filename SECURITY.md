@@ -2,14 +2,13 @@
 
 ## Found something?
 
-Please don't open a public issue for it. Email **firaslamou@gmail.com** with:
+Please open an issue on the repository to report it. If you feel the vulnerability is too sensitive for a public issue, you can also email **firaslamou@gmail.com**. When reporting, please include:
 
 - what the problem is and roughly where in the code,
 - how to reproduce it, or a proof of concept,
 - what you think someone could do with it.
 
-You'll hear back within a few days. Give it a reasonable window to be fixed and released before
-you write about it publicly.
+You'll hear back within a few days. If it's a critical vulnerability, please give it a reasonable window to be fixed and released before you write about it publicly.
 
 ## What counts
 

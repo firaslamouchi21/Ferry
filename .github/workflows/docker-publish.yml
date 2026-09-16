@@ -8,6 +8,8 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
+  attestations: write
 
 jobs:
   build-and-push:
@@ -50,11 +52,20 @@ jobs:
             tags="$tags,${{ vars.DOCKERHUB_USERNAME }}/ferry:${version},${{ vars.DOCKERHUB_USERNAME }}/ferry:latest"
           fi
           echo "tags=$tags" >>"$GITHUB_OUTPUT"
+          echo "ghcr_image=ghcr.io/${repo_lower}" >>"$GITHUB_OUTPUT"
 
       - name: Build and push
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
           push: true
           tags: ${{ steps.tags.outputs.tags }}
+
+      - name: Attest build provenance for the image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.tags.outputs.ghcr_image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

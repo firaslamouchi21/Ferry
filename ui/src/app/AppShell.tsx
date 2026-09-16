@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Outlet, useNavigate } from "react-router-dom";
 import { Bell, TerminalSquare, UserRound } from "lucide-react";
 import { SideNav } from "./SideNav";
@@ -5,10 +6,28 @@ import { ConnectionGate } from "./ConnectionGate";
 import { CommandPalette } from "./CommandPalette";
 import { ToastHost } from "./ToastHost";
 import { useT } from "@/lib/i18n";
+import { useFerry } from "@/lib/query";
+
+function useHostNavigation() {
+  const navigate = useNavigate();
+  const { client } = useFerry();
+  useEffect(() => {
+    if (client.host !== "vscode") return;
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { kind?: unknown; route?: unknown } | null;
+      if (data && data.kind === "navigate" && typeof data.route === "string" && data.route.startsWith("/")) {
+        navigate(data.route);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [client.host, navigate]);
+}
 
 export function AppShell() {
   const navigate = useNavigate();
   const t = useT();
+  useHostNavigation();
   return (
     <div className="shell">
       <SideNav />

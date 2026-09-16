@@ -2,7 +2,7 @@ export const LOCALES = ["en", "fr", "de", "es", "pt", "ja", "zh", "ar"] as const
 export type Locale = (typeof LOCALES)[number];
 export const DEFAULT_LOCALE: Locale = "en";
 
-// es/pt/ja/zh/ar catalogs stay in the repo (machine-translated, never native-reviewed)
+// es/pt/ja/zh/ar catalogs stay in the repo (machine-translated, im not a native speaker i cant verify them i could only verify the en/fr/de catalogs)
 // but are dormant: not selectable in the UI and not reachable via locale detection.
 // Only the shipped ACTIVE_LOCALES are usable. Re-activate by adding one back here.
 export const ACTIVE_LOCALES = ["en", "fr", "de"] as const satisfies readonly Locale[];

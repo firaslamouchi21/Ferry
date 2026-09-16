@@ -6,6 +6,7 @@
   "version": "0.1.0",
   "type": "commonjs",
   "publisher": "ferry",
+  "icon": "media/icon.png",
   "license": "Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/firaslamouchi21/Ferry.git" },
   "engines": { "vscode": "^1.85.0" },
@@ -17,7 +18,7 @@
       "activitybar": [{ "id": "ferry", "title": "Ferry", "icon": "media/ferry.svg" }]
     },
     "views": {
-      "ferry": [{ "id": "ferryPeers", "name": "Peers" }]
+      "ferry": [{ "type": "webview", "id": "ferryMain", "name": "Ferry" }]
     },
     "commands": [
       { "command": "ferry.open", "title": "Ferry: Open Panel" },
@@ -25,13 +26,11 @@
       { "command": "ferry.sendFile", "title": "Ferry: Send File" },
       { "command": "ferry.openInbox", "title": "Ferry: Open Inbox" },
       { "command": "ferry.copyFingerprint", "title": "Ferry: Copy My Fingerprint" },
-      { "command": "ferry.refreshPeers", "title": "Ferry: Refresh Peers", "icon": "$(refresh)" },
       { "command": "ferry.startDaemon", "title": "Ferry: Start Daemon" },
       { "command": "ferry.restartDaemon", "title": "Ferry: Restart Daemon" }
     ],
     "menus": {
-      "explorer/context": [{ "command": "ferry.sendFile", "group": "7_modification", "when": "!explorerResourceIsFolder" }],
-      "view/title": [{ "command": "ferry.refreshPeers", "when": "view == ferryPeers", "group": "navigation" }]
+      "explorer/context": [{ "command": "ferry.sendFile", "group": "7_modification", "when": "!explorerResourceIsFolder" }]
     },
     "configuration": {
       "title": "Ferry",

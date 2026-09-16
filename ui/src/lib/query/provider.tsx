@@ -36,7 +36,8 @@ export function FerryProvider({ children, client }: { children: ReactNode; clien
       }),
     [],
   );
-  const ferryRef = useRef(client ?? new FerryClient());
+  const ferryRef = useRef<FerryClient | null>(null);
+  if (ferryRef.current === null) ferryRef.current = client ?? new FerryClient();
   const ferry = ferryRef.current;
   const [phase, setPhase] = useState<ConnectionPhase>(ferry.phase());
   const [lastEvent, setLastEvent] = useState<IpcEvent | null>(null);
