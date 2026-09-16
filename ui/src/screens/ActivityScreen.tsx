@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import { Download } from "lucide-react";
-import { useAuditLog } from "@/lib/query";
+import { useAuditLog, useFerryClient } from "@/lib/query";
 import { Button, DataTable, EmptyState, StatusChip } from "@/components";
-import { detectHost, num } from "@/lib/ipc";
+import { num } from "@/lib/ipc";
 import { formatTime } from "@/lib/format";
 import { useT } from "@/lib/i18n";
 import { Async, ScreenHeader } from "./parts";
@@ -10,6 +10,7 @@ import { Async, ScreenHeader } from "./parts";
 export function ActivityScreen() {
   const [limit, setLimit] = useState(200);
   const audit = useAuditLog(limit);
+  const ferry = useFerryClient();
   const t = useT();
   const [filter, setFilter] = useState("");
 
@@ -28,20 +29,7 @@ export function ActivityScreen() {
     );
     const csv = [header, ...lines].join("\n");
 
-    let downloaded = false;
-    if (detectHost() !== "vscode") {
-      try {
-        const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = "ferry-activity.csv";
-        a.click();
-        URL.revokeObjectURL(url);
-        downloaded = true;
-      } catch {
-        void 0;
-      }
-    }
+    const downloaded = await ferry.saveFile("ferry-activity.csv", async () => new TextEncoder().encode(csv));
     if (!downloaded) {
       try {
         await navigator.clipboard.writeText(csv);

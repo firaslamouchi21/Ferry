@@ -1,5 +1,7 @@
 # Ferry
 
+<img src="public/ferry-logo.png" alt="Ferry logo" width="120" />
+
 Ferry moves files, secrets, and short messages straight from one of your machines to another —
 no cloud, no account, no server in the middle. Every machine on your team runs the same small
 `ferry-daemon`, which finds the others on your network and hands the bytes across a direct,
@@ -83,8 +85,8 @@ log knows that something happened and when, and nothing about what it was.
 
 ## Getting it
 
-Signed installers and a published extension aren't wired up yet — for now you build those two
-from source (see below). Once there are releases:
+Every channel below is produced by the release pipeline on each tag; the extension isn't on the
+marketplaces yet, so it's a sideload from the releases page for now.
 
 - **Command line** — download the archive for your platform from the releases page
   (`.tar.gz` on Linux/macOS, `.zip` on Windows), extract it, and drop `ferry`/`ferry-daemon`
@@ -94,7 +96,9 @@ from source (see below). Once there are releases:
   published). No Rust/Node toolchain needed; see [docker/README.md](docker/README.md).
 - **VS Code** — install the Ferry extension. It brings its own daemon, so there's nothing else
   to set up.
-- **Desktop app** — a signed installer for macOS, Windows, and Linux.
+- **Desktop app** — `.deb` / `.AppImage` / `.rpm` on Linux, `.dmg` on macOS, `.msi` / setup `.exe` on
+  Windows, from the releases page. It carries its own daemon, nothing else to install. (Unsigned
+  until certificates land — see [docs/SIGNING.md](docs/SIGNING.md).)
 
 ## A first run, from the terminal
 

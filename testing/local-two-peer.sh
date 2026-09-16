@@ -142,5 +142,57 @@ got=$(sha256sum "$ROOT/received.bin" | awk '{print $1}')
 [ "$want" = "$got" ] || fail "content hash mismatch: sent $want, got $got"
 pass "received content matches ($want)"
 
+echo "==> a sends a file inline over raw IPC (the browser / Docker host path) to b"
+head -c 200000 /dev/urandom > "$ROOT/inline.bin"
+want_inline=$(sha256sum "$ROOT/inline.bin" | awk '{print $1}')
+inline_out=$(python3 - "$ROOT/a/xdg/ferry/ferry.sock" "$peer_b_id" "$ROOT/inline.bin" <<'PY'
+import base64, json, socket, struct, sys
+sock_path, peer_id, payload = sys.argv[1:4]
+content = base64.b64encode(open(payload, "rb").read()).decode()
+envelope = {
+    "ipc_protocol_version": 1,
+    "request_id": "inline-file-test",
+    "request": {
+        "method": "send_inline",
+        "params": {
+            "peer_id": peer_id,
+            "name": "inline.bin",
+            "kind": "file",
+            "content_base64": content,
+            "ttl_secs": 3600,
+            "is_burn_after_read": False,
+            "notify_on_open": False,
+        },
+    },
+}
+body = json.dumps(envelope).encode()
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(sock_path)
+s.sendall(struct.pack(">I", len(body)) + body)
+n = struct.unpack(">I", s.recv(4))[0]
+data = b""
+while len(data) < n:
+    chunk = s.recv(n - len(data))
+    if not chunk:
+        break
+    data += chunk
+print(data.decode())
+PY
+) || fail "inline send IPC failed"
+echo "$inline_out" | grep -q '"outcome":"ok"' || fail "inline send was rejected: $inline_out"
+pass "inline file send accepted as a local write"
+
+item_inline=""
+for _ in $(seq 1 "$RECV_TIMEOUT"); do
+  item_inline=$(peer b "$CLI" receive list 2>/dev/null | awk 'tolower($0) ~ /inline.bin/ && tolower($0) ~ /delivered/ {print $1}' | head -1 || true)
+  [ -n "$item_inline" ] && break
+  sleep 1
+done
+[ -n "$item_inline" ] || fail "b did not receive the inline file within ${RECV_TIMEOUT}s"
+peer b "$CLI" receive open "$item_inline" --out "$ROOT/received-inline.bin" || fail "b could not open the inline item"
+got_inline=$(sha256sum "$ROOT/received-inline.bin" | awk '{print $1}')
+[ "$want_inline" = "$got_inline" ] || fail "inline content hash mismatch: sent $want_inline, got $got_inline"
+pass "inline file received intact ($want_inline)"
+
 echo
 echo "==> ALL CHECKS PASSED — real Linux-to-Linux transfer on one host"

@@ -59,6 +59,51 @@ fn daemon_running() -> bool {
     daemon_reachable()
 }
 
+#[derive(serde::Serialize)]
+struct PickedFile {
+    path: String,
+    name: String,
+}
+
+fn picked(path: std::path::PathBuf) -> PickedFile {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    PickedFile { path: path.to_string_lossy().into_owned(), name }
+}
+
+#[tauri::command]
+async fn pick_file(app: tauri::AppHandle) -> Option<PickedFile> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_file())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|f| f.into_path().ok())
+        .map(picked)
+}
+
+#[tauri::command]
+async fn pick_save_path(app: tauri::AppHandle, name: String) -> Option<PickedFile> {
+    use tauri_plugin_dialog::DialogExt;
+    tauri::async_runtime::spawn_blocking(move || app.dialog().file().set_file_name(name).blocking_save_file())
+        .await
+        .ok()
+        .flatten()
+        .and_then(|f| f.into_path().ok())
+        .map(picked)
+}
+
+#[tauri::command]
+fn write_file(path: String, content_base64: String) -> Result<(), String> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(content_base64)
+        .map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| format!("could not write {path}: {e}"))
+}
+
 #[tauri::command]
 fn start_daemon() -> Result<(), String> {
     spawn_daemon().map(|_| ())
@@ -156,6 +201,42 @@ mod tests {
         let name = if cfg!(windows) { "ferry-daemon.exe" } else { "ferry-daemon" };
         assert_eq!(bin.file_name().unwrap(), name);
     }
+
+    #[test]
+    fn a_picked_path_carries_its_file_name() {
+        let p = picked(std::path::PathBuf::from("/home/me/Downloads/report final.pdf"));
+        assert_eq!(p.name, "report final.pdf");
+        assert_eq!(p.path, "/home/me/Downloads/report final.pdf");
+    }
+
+    #[test]
+    fn write_file_round_trips_binary_content() {
+        let dir = std::env::temp_dir().join(format!("ferry-desktop-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("out.bin");
+        let bytes: Vec<u8> = (0..=255u8).collect();
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        write_file(target.to_string_lossy().into_owned(), b64).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn write_file_rejects_bad_base64_without_touching_disk() {
+        let dir = std::env::temp_dir().join(format!("ferry-desktop-badb64-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("never.bin");
+        assert!(write_file(target.to_string_lossy().into_owned(), "not base64!!".into()).is_err());
+        assert!(!target.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn write_file_reports_an_unwritable_destination() {
+        let err = write_file("/proc/ferry-cannot-write-here/x".into(), "AA==".into()).unwrap_err();
+        assert!(err.contains("could not write"), "{err}");
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -182,7 +263,10 @@ pub fn run() {
             ipc_request,
             ipc_subscribe,
             daemon_running,
-            start_daemon
+            start_daemon,
+            pick_file,
+            pick_save_path,
+            write_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running Ferry");

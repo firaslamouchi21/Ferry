@@ -1,5 +1,5 @@
 import { MockTransport } from "./mock";
-import { VsCodeTransport, WebSocketTransport, type ConnectionPhase, type Transport } from "./transport";
+import { VsCodeTransport, WebSocketTransport, type ConnectionPhase, type PickedFile, type Transport } from "./transport";
 import {
   IPC_PROTOCOL_VERSION,
   type AuditEventView,
@@ -108,6 +108,12 @@ export class FerryClient {
   }
   startDaemon(): Promise<void> {
     return this.transport.startDaemon();
+  }
+  pickFile(): Promise<PickedFile | null> {
+    return this.transport.pickFile();
+  }
+  saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean> {
+    return this.transport.saveFile(name, produce);
   }
   phase(): ConnectionPhase {
     return this.transport.phase();

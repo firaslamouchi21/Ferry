@@ -20,14 +20,7 @@ export function PeersScreen() {
   const [removing, setRemoving] = useState<RosterPeerView | null>(null);
 
   async function exportRoster() {
-    const json = await ferry.rosterExport();
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "ferry-roster.json";
-    a.click();
-    URL.revokeObjectURL(url);
+    await ferry.saveFile("ferry-roster.json", async () => new TextEncoder().encode(await ferry.rosterExport()));
   }
 
   function importRoster() {

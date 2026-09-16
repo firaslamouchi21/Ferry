@@ -2,6 +2,11 @@ import type { IpcEnvelope, IpcEvent, IpcResponse } from "./types";
 
 export type ConnectionPhase = "connecting" | "connected" | "disconnected";
 
+export interface PickedFile {
+  path: string;
+  name: string;
+}
+
 export interface Transport {
   send(envelope: IpcEnvelope): Promise<IpcResponse>;
   onEvent(listener: (event: IpcEvent) => void): () => void;
@@ -12,6 +17,8 @@ export interface Transport {
   retryNow(): void;
   canStartDaemon(): boolean;
   startDaemon(): Promise<void>;
+  pickFile(): Promise<PickedFile | null>;
+  saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean>;
 }
 
 type BridgeMessage =
@@ -19,7 +26,24 @@ type BridgeMessage =
   | { kind: "event"; data: IpcEvent }
   | { kind: "error"; id?: string; message: string }
   | { kind: "daemon-start-result"; ok: boolean; message?: string }
+  | { kind: "pick-file-result"; file: PickedFile | null }
+  | { kind: "save-file-result"; ok: boolean; message?: string }
   | { kind: "subscribe_closed" };
+
+export function downloadBytes(name: string, bytes: Uint8Array): boolean {
+  if (typeof document === "undefined") return false;
+  try {
+    const url = URL.createObjectURL(new Blob([bytes as BlobPart]));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 class Emitter<T> {
   private listeners = new Set<(value: T) => void>();
@@ -87,6 +111,14 @@ export class WebSocketTransport implements Transport {
       throw new Error(body || `the dev bridge could not start the daemon (HTTP ${res.status})`);
     }
     this.retryNow();
+  }
+
+  pickFile(): Promise<PickedFile | null> {
+    return Promise.resolve(null);
+  }
+
+  async saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean> {
+    return downloadBytes(name, await produce());
   }
 
   private teardown(ws: WebSocket | null) {
@@ -223,6 +255,13 @@ declare global {
   }
 }
 
+let vsCodeApi: VsCodeApi | null = null;
+
+function vsCodeApiOnce(): VsCodeApi {
+  if (vsCodeApi === null) vsCodeApi = window.acquireVsCodeApi!();
+  return vsCodeApi;
+}
+
 export class VsCodeTransport implements Transport {
   private api: VsCodeApi;
   private events = new Emitter<IpcEvent>();
@@ -232,11 +271,13 @@ export class VsCodeTransport implements Transport {
   private rejecters = new Map<string, (error: Error) => void>();
 
   constructor() {
-    this.api = window.acquireVsCodeApi!();
+    this.api = vsCodeApiOnce();
     window.addEventListener("message", (event) => this.handle(event.data));
   }
 
   private daemonStart: { resolve: () => void; reject: (e: Error) => void } | null = null;
+  private filePick: ((file: PickedFile | null) => void) | null = null;
+  private fileSave: { resolve: (ok: boolean) => void; reject: (e: Error) => void } | null = null;
 
   private handle(
     msg: BridgeMessage & { phase?: ConnectionPhase; ok?: boolean; message?: string },
@@ -253,6 +294,13 @@ export class VsCodeTransport implements Transport {
       if (msg.ok) this.daemonStart?.resolve();
       else this.daemonStart?.reject(new Error(msg.message || "could not start the daemon"));
       this.daemonStart = null;
+    } else if (msg.kind === "pick-file-result") {
+      this.filePick?.(msg.file);
+      this.filePick = null;
+    } else if (msg.kind === "save-file-result") {
+      if (msg.ok || !msg.message) this.fileSave?.resolve(msg.ok);
+      else this.fileSave?.reject(new Error(msg.message));
+      this.fileSave = null;
     } else if (msg.kind === "error" && msg.id) {
       this.rejecters.get(msg.id)?.(new Error(msg.message ?? "daemon error"));
       this.pending.delete(msg.id);
@@ -293,6 +341,30 @@ export class VsCodeTransport implements Transport {
           this.daemonStart = null;
         }
       }, 12000);
+    });
+  }
+
+  pickFile(): Promise<PickedFile | null> {
+    return new Promise((resolve) => {
+      this.filePick = resolve;
+      this.api.postMessage({ kind: "pick-file" });
+    });
+  }
+
+  async saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean> {
+    const target = await new Promise<PickedFile | null>((resolve) => {
+      this.filePick = resolve;
+      this.api.postMessage({ kind: "pick-save-path", name });
+    });
+    if (!target) return false;
+    const bytes = await produce();
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return new Promise((resolve, reject) => {
+      this.fileSave = { resolve, reject };
+      this.api.postMessage({ kind: "save-file", path: target.path, content_base64: btoa(binary) });
     });
   }
 

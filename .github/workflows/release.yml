@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -89,19 +91,23 @@ jobs:
         if: matrix.os != 'windows-latest'
         shell: bash
         run: |
-          shopt -s nullglob
-          mkdir -p pkg
-          chmod +x "dist/ferry-${{ matrix.name }}" "dist/ferry-daemon-${{ matrix.name }}"
-          cd dist
-          files=("ferry-${{ matrix.name }}" "ferry-daemon-${{ matrix.name }}" *.asc)
-          tar -czf "../pkg/ferry-${{ matrix.name }}.tar.gz" "${files[@]}"
+          mkdir -p pkg stage
+          cp "dist/ferry-${{ matrix.name }}" stage/ferry
+          cp "dist/ferry-daemon-${{ matrix.name }}" stage/ferry-daemon
+          chmod +x stage/ferry stage/ferry-daemon
+          [ -f "dist/ferry-${{ matrix.name }}.asc" ] && cp "dist/ferry-${{ matrix.name }}.asc" stage/ferry.asc
+          [ -f "dist/ferry-daemon-${{ matrix.name }}.asc" ] && cp "dist/ferry-daemon-${{ matrix.name }}.asc" stage/ferry-daemon.asc
+          cd stage
+          tar -czf "../pkg/ferry-${{ matrix.name }}.tar.gz" *
 
       - name: Package a ready-to-run archive (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path pkg | Out-Null
-          Compress-Archive -Path "dist/ferry-${{ matrix.name }}.exe","dist/ferry-daemon-${{ matrix.name }}.exe" -DestinationPath "pkg/ferry-${{ matrix.name }}.zip"
+          New-Item -ItemType Directory -Force -Path pkg,stage | Out-Null
+          Copy-Item "dist/ferry-${{ matrix.name }}.exe" "stage/ferry.exe"
+          Copy-Item "dist/ferry-daemon-${{ matrix.name }}.exe" "stage/ferry-daemon.exe"
+          Compress-Archive -Path "stage/ferry.exe","stage/ferry-daemon.exe" -DestinationPath "pkg/ferry-${{ matrix.name }}.zip"
 
       - name: Archive checksum
         shell: bash
@@ -112,6 +118,59 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ferry-release-${{ matrix.name }}
+          path: pkg/*
+
+  desktop:
+    name: desktop (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, name: linux-x86_64, target: x86_64-unknown-linux-gnu, bundles: "deb,appimage,rpm" }
+          - { os: macos-latest, name: macos-aarch64, target: aarch64-apple-darwin, bundles: "dmg" }
+          - { os: windows-latest, name: windows-x86_64, target: x86_64-pc-windows-msvc, bundles: "msi,nsis" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            desktop/src-tauri
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev patchelf
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Build the daemon sidecar
+        run: cargo build --release --locked --target ${{ matrix.target }} -p ferry-daemon
+      - name: Regenerate bindings for the UI build
+        run: cargo test --package ferry-proto --locked
+      - run: pnpm install --frozen-lockfile
+      - name: Build the desktop bundles
+        env:
+          FERRY_TARGET: ${{ matrix.target }}
+        run: pnpm --filter @ferry/desktop tauri build --bundles ${{ matrix.bundles }}
+      - name: Collect bundles
+        shell: bash
+        run: |
+          mkdir -p pkg
+          find desktop/src-tauri/target/release/bundle -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) -exec cp {} pkg/ \;
+          ls -la pkg
+          [ "$(ls pkg | wc -l)" -gt 0 ]
+          cd pkg
+          if command -v sha256sum >/dev/null; then sha256sum * > "SHA256SUMS-desktop-${{ matrix.name }}.txt"; else shasum -a 256 * > "SHA256SUMS-desktop-${{ matrix.name }}.txt"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ferry-desktop-${{ matrix.name }}
           path: pkg/*
 
   vsix:
@@ -191,7 +250,7 @@ jobs:
 
   release:
     name: publish GitHub Release
-    needs: [binaries, vsix]
+    needs: [binaries, vsix, desktop]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
@@ -203,12 +262,29 @@ jobs:
         with:
           pattern: ferry-vsix-*
           path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ferry-desktop-*
+          path: artifacts
       - name: Assemble the release directory
         run: |
           mkdir release
           find artifacts -type f ! -name 'SHA256SUMS-*' -exec cp {} release/ \;
           cat artifacts/*/SHA256SUMS-*.txt > release/SHA256SUMS.txt
           ls -la release
+      - name: Attest build provenance for every release asset
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/*.zip
+            release/*.vsix
+            release/*.deb
+            release/*.AppImage
+            release/*.rpm
+            release/*.dmg
+            release/*.msi
+            release/*-setup.exe
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ConnectionPhase, IpcEnvelope, IpcEvent, IpcResponse, Transport } from "@ferry/ui/lib/ipc";
+import type { ConnectionPhase, IpcEnvelope, IpcEvent, IpcResponse, PickedFile, Transport } from "@ferry/ui/lib/ipc";
 
 export class TauriTransport implements Transport {
   private eventListeners = new Set<(event: IpcEvent) => void>();
@@ -78,6 +78,22 @@ export class TauriTransport implements Transport {
   async startDaemon(): Promise<void> {
     await invoke("start_daemon");
     this.retryNow();
+  }
+
+  pickFile(): Promise<PickedFile | null> {
+    return invoke<PickedFile | null>("pick_file");
+  }
+
+  async saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean> {
+    const target = await invoke<PickedFile | null>("pick_save_path", { name });
+    if (!target) return false;
+    const bytes = await produce();
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    await invoke("write_file", { path: target.path, contentBase64: btoa(binary) });
+    return true;
   }
 
   private setPhase(phase: ConnectionPhase) {

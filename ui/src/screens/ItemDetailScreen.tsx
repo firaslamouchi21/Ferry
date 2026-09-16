@@ -10,7 +10,7 @@ import {
 } from "@/lib/query";
 import { Button, ConfirmDialog, ErrorState, MaskedValue, ProgressBar, Skeleton, StateBadge } from "@/components";
 import { num, optNum, type TransferState } from "@/lib/ipc";
-import { decodeBase64, formatClock, useFormat } from "@/lib/format";
+import { decodeBase64, decodeBase64Bytes, formatClock, useFormat } from "@/lib/format";
 import { useT, useTParts } from "@/lib/i18n";
 
 const LIFECYCLE: TransferState[] = ["offered", "accepted", "delivered", "opened"];
@@ -29,6 +29,7 @@ export function ItemDetailScreen() {
 
   const [content, setContent] = useState<string | null>(null);
   const [confirmBurn, setConfirmBurn] = useState(false);
+  const [saveNote, setSaveNote] = useState<string | null>(null);
 
   if (item.isLoading) {
     return (
@@ -65,9 +66,34 @@ export function ItemDetailScreen() {
       setConfirmBurn(true);
       return;
     }
+    if (it.kind === "file") {
+      await saveToDisk();
+      return;
+    }
     const b64 = await ferry.open(it.item_id);
     setContent(decodeBase64(b64));
     await confirmOpened.mutateAsync(it.item_id);
+  }
+
+  async function saveToDisk() {
+    setSaveNote(null);
+    let opened = false;
+    try {
+      const saved = await ferry.saveFile(it.name, async () => {
+        const b64 = await ferry.open(it.item_id);
+        opened = true;
+        return decodeBase64Bytes(b64);
+      });
+      if (saved) {
+        await confirmOpened.mutateAsync(it.item_id);
+        setSaveNote(t("item.saved", { name: it.name }));
+      } else if (opened) {
+        await confirmOpened.mutateAsync(it.item_id);
+      }
+    } catch (err) {
+      setSaveNote(t("item.saveFailed", { error: (err as Error).message ?? String(err) }));
+      if (opened) await confirmOpened.mutateAsync(it.item_id);
+    }
   }
 
   const secretLines =
@@ -136,14 +162,17 @@ export function ItemDetailScreen() {
           <h2>{t("item.payloadContent")}</h2>
           {content == null && (it.state === "delivered" || it.state === "opened") ? (
             <Button variant="primary" onClick={() => reveal()}>
-              {it.kind === "secret" ? t("item.decrypt") : t("common.open")}
+              {it.kind === "secret" ? t("item.decrypt") : it.kind === "file" ? t("item.save") : t("common.open")}
             </Button>
           ) : null}
         </div>
+        {saveNote ? <p className="muted mono">{saveNote}</p> : null}
         {content == null ? (
           <p className="muted">
             {it.state === "delivered" || it.state === "opened"
-              ? t("item.heldSealed")
+              ? it.kind === "file"
+                ? t("item.saveHint")
+                : t("item.heldSealed")
               : t("item.notAvailableWhile", { state: it.state })}
           </p>
         ) : it.kind === "secret" ? (

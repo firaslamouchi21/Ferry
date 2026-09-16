@@ -83,6 +83,19 @@ export function decodeBase64(b64: string): string {
   return DECODER.decode(bytes);
 }
 
+export function decodeBase64Bytes(b64: string): Uint8Array {
+  const binary = atob(b64);
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+export function encodeBase64Bytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
 export function encodeBase64(text: string): string {
   const bytes = new TextEncoder().encode(text);
   let binary = "";

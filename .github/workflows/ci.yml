@@ -158,6 +158,10 @@ jobs:
         run: cargo test --package ferry-proto --locked
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @ferry/desktop build
+      - name: Build + stage the daemon sidecar the Tauri build embeds
+        run: |
+          cargo build --locked -p ferry-daemon
+          pnpm --filter @ferry/desktop stage-daemon --profile debug
       - name: cargo check the Tauri crate (its own workspace, so the root build never sees it)
         working-directory: desktop/src-tauri
         run: cargo check --locked
