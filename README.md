@@ -1,6 +1,7 @@
-# Ferry
+# Ferry 
 
 <img src="public/ferry-logo.png" alt="Ferry logo" width="120" />
+Note: ferry is still under pre-prod. I’ll reset to the final version and release it for public use and marketing in a few weeks.
 
 Ferry moves files, secrets, and short messages straight from one of your machines to another —
 no cloud, no account, no server in the middle. Every machine on your team runs the same small
