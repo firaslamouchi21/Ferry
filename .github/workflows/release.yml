@@ -208,10 +208,15 @@ jobs:
           --daemon "$GITHUB_WORKSPACE/daemon-bin/${{ matrix.daemon_file }}"
           --out "ferry-${{ matrix.vsce_target }}.vsix"
         working-directory: ext/vscode
+      - name: Checksum the .vsix
+        run: sha256sum ferry-${{ matrix.vsce_target }}.vsix > "SHA256SUMS-vsix-${{ matrix.vsce_target }}.txt"
+        working-directory: ext/vscode
       - uses: actions/upload-artifact@v4
         with:
           name: ferry-vsix-${{ matrix.vsce_target }}
-          path: ext/vscode/ferry-${{ matrix.vsce_target }}.vsix
+          path: |
+            ext/vscode/ferry-${{ matrix.vsce_target }}.vsix
+            ext/vscode/SHA256SUMS-vsix-${{ matrix.vsce_target }}.txt
 
   publish-extension:
     name: publish .vsix to the marketplaces

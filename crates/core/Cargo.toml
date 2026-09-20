@@ -12,7 +12,7 @@ bincode = "1"
 directories = "6.0.0"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 ferry-crypto = { path = "../crypto" }
-ferry-net = { version = "0.1.0", path = "../net" }
+ferry-net = { path = "../net" }
 ferry-proto = { path = "../proto" }
 hex = "0.4.3"
 rand = "0.8"

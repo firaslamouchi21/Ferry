@@ -1411,7 +1411,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-crypto"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "age",
  "bech32",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "ferry-desktop"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "ferry-core",
@@ -1472,18 +1472,19 @@ dependencies = [
 
 [[package]]
 name = "ferry-net"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ferry-proto",
  "interprocess",
  "mdns-sd",
  "snow",
  "thiserror 2.0.20",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "ferry-proto"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "ts-rs",

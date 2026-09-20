@@ -31,6 +31,7 @@ fn ipc_write_frame(stream: &mut Stream, bytes: &[u8]) -> Result<(), FramingError
     framing::write_frame_with_max(stream, bytes, IPC_MAX_FRAME_BYTES)
 }
 
+#[cfg(test)]
 fn ipc_read_frame(stream: &mut Stream) -> Result<Vec<u8>, FramingError> {
     framing::read_frame_with_max(stream, IPC_MAX_FRAME_BYTES)
 }
@@ -88,7 +89,10 @@ fn handle_connection(
         eprintln!("ferry-daemon: could not set IPC connection timeout: {err}");
     }
 
-    let frame = match ipc_read_frame(&mut stream) {
+    let frame = match framing::read_frame_with_max(
+        &mut local_ipc::reader_with_deadline(&mut stream, IPC_CONNECTION_TIMEOUT),
+        IPC_MAX_FRAME_BYTES,
+    ) {
         Ok(frame) => frame,
         Err(err) => {
             eprintln!("ferry-daemon: dropping IPC connection — failed to read frame: {err}");

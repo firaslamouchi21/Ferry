@@ -27,6 +27,8 @@ pub enum RosterError {
     InvalidSignature,
     #[error("roster signer key is malformed")]
     MalformedSignerKey,
+    #[error("roster signer id does not match the key that signed it — file may be tampered with")]
+    SignerMismatch,
     #[error("roster signature is not valid hex or is not 64 bytes")]
     MalformedSignature,
     #[error("roster contains the signer as one of its own entries")]
@@ -66,6 +68,10 @@ impl SignedRoster {
             .any(|e| e.signing_key == self.signer_signing_key)
         {
             return Err(RosterError::SelfIncluded);
+        }
+
+        if !self.signer.0.eq_ignore_ascii_case(&hex::encode(self.signer_signing_key)) {
+            return Err(RosterError::SignerMismatch);
         }
 
         let verifying_key = VerifyingKey::from_bytes(&self.signer_signing_key)
@@ -131,11 +137,21 @@ mod tests {
         let mut signed = SignedRoster::sign(&identity, vec![sample_entry(1)]).unwrap();
         let attacker = Identity::generate();
         signed.signer_signing_key = attacker.verifying_key().to_bytes();
+        signed.signer = PeerId(hex::encode(signed.signer_signing_key));
 
         assert!(matches!(
             signed.verify(),
             Err(RosterError::InvalidSignature)
         ));
+    }
+
+    #[test]
+    fn relabelled_signer_id_fails_verification() {
+        let identity = Identity::generate();
+        let mut signed = SignedRoster::sign(&identity, vec![sample_entry(1)]).unwrap();
+        signed.signer = PeerId("0".repeat(64));
+
+        assert!(matches!(signed.verify(), Err(RosterError::SignerMismatch)));
     }
 
     #[test]

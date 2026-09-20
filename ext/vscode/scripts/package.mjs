@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -32,8 +32,12 @@ if (daemon) {
   console.log("no --daemon given: packaging a generic .vsix (extension falls back to ferry.daemonPath / PATH)");
 }
 
+const onWindows = process.platform === "win32";
+const quote = (arg) => (onWindows && /[\s"]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg);
 const run = (cmd, cmdArgs) =>
-  execFileSync(cmd, cmdArgs, { cwd: root, stdio: "inherit" });
+  onWindows
+    ? execSync([cmd, ...cmdArgs.map(quote)].join(" "), { cwd: root, stdio: "inherit" })
+    : execFileSync(cmd, cmdArgs, { cwd: root, stdio: "inherit" });
 
 run("pnpm", ["run", "build"]);
 const vsceArgs = ["package", "--no-dependencies", "-o", out];
