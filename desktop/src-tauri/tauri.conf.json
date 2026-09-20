@@ -48,7 +48,13 @@
     ],
     "externalBin": [
       "binaries/ferry-daemon"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    }
   },
   "mainBinaryName": "ferry-desktop"
 }
