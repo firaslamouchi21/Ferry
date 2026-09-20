@@ -167,6 +167,9 @@ pub fn handle(
         | IpcRequest::RemoteJobStatus { .. } => internal_error(
             "remote provider requests are handled by the daemon's provider registry, not the request dispatcher".into(),
         ),
+        IpcRequest::SetRemoteFeaturesEnabled { .. } => internal_error(
+            "config-writing requests are handled by the daemon's IPC server wrapper, not the request dispatcher".into(),
+        ),
     };
 
     IpcResponse { request_id, outcome }

@@ -329,7 +329,7 @@ export class MockTransport implements Transport {
           result: "open",
           value: {
             content_base64: btoa(
-              "POSTGRES_URL=postgres://ferry:s3cr3t@db.internal:5432/app\nREDIS_URL=redis://cache.internal:6379\nSIGNING_SECRET=sk_live_4eC39HqLyjWDarjtT1zdp7dc",
+              "POSTGRES_URL=postgres://ferry:s3cr3t@db.internal:5432/app\nREDIS_URL=redis://cache.internal:6379\nSIGNING_SECRET=example-signing-secret-not-a-real-credential",
             ),
           },
         })(id);
@@ -498,6 +498,8 @@ export class MockTransport implements Transport {
       case "provider_disconnect":
         this.providerConnected = false;
         this.emit({ event: "changed", params: { resource: "provider", id: null } });
+        return ok({ result: "ack" })(id);
+      case "set_remote_features_enabled":
         return ok({ result: "ack" })(id);
       case "gist_publish": {
         const jobId = `JOB_${Math.random().toString(36).slice(2, 8)}`;

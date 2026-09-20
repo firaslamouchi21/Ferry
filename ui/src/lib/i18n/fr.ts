@@ -310,6 +310,24 @@ export const fr: Catalog = {
     themeSystem: "Système",
     themeLight: "Clair",
     themeDark: "Sombre",
+    remoteFeatures: "Connexion GitHub",
+    remoteFeaturesHint:
+      "Optionnel. Désactivé par défaut. Permet de publier un élément scellé comme gist privé ou de récupérer un roster d'équipe signé — Ferry ne contacte jamais GitHub pour autre chose.",
+    remoteFeaturesState: "État",
+    remoteFeaturesOnNotConnected: "Activé, non connecté",
+    remoteFeaturesOnConnected: "Activé, connecté en tant que {login}",
+    remoteFeaturesEnable: "Activer",
+    remoteFeaturesDisable: "Désactiver",
+    remoteFeaturesRestartNotice: "Enregistré. Redémarrez le démon (ci-dessous) pour appliquer ce changement.",
+    remoteFeaturesConfirmTitle: "Activer les fonctionnalités GitHub ?",
+    remoteFeaturesConfirmButton: "Activer",
+    remoteFeaturesConfirmBody1:
+      "Ceci active la connexion optionnelle de Ferry à l'API GitHub. Aucun appel réseau n'a lieu tant que vous n'avez pas aussi connecté un compte et utilisé l'une des deux fonctionnalités ci-dessous.",
+    remoteFeaturesConfirmBody2:
+      "Publier un gist : place une copie chiffrée d'un élément sur GitHub sous forme de gist privé. GitHub apprend alors la clé publique du destinataire et la taille du texte chiffré, et la destruction après lecture ne peut plus être garantie pour cet élément une fois qu'il a quitté cette machine.",
+    remoteFeaturesConfirmBody3:
+      "Récupérer un roster d'équipe : lit un fichier de roster signé depuis un dépôt de votre choix, pour aperçu et import.",
+    remoteFeaturesConfirmBody4: "Vous pouvez désactiver ceci à tout moment ; un redémarrage du démon est nécessaire dans les deux cas.",
     processControl: "Contrôle du processus",
     processControlHint:
       "Actions manuelles sur le cycle de vie du démon. À utiliser avec prudence pendant des transferts actifs.",

@@ -290,6 +290,7 @@ fn boot() -> Result<(), BootError> {
         &pairing,
         &provider,
         &mut ipc_source,
+        &config.data_dir,
     )?;
     let _ = std::fs::remove_file(&socket_path);
 

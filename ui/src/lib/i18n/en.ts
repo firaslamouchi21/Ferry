@@ -307,6 +307,24 @@ export const en = {
     themeSystem: "System",
     themeLight: "Light",
     themeDark: "Dark",
+    remoteFeatures: "GitHub connection",
+    remoteFeaturesHint:
+      "Optional. Off by default. Lets you publish a sealed item as a private gist or fetch a signed team roster — Ferry never contacts GitHub for anything else.",
+    remoteFeaturesState: "Status",
+    remoteFeaturesOnNotConnected: "On, not connected",
+    remoteFeaturesOnConnected: "On, connected as {login}",
+    remoteFeaturesEnable: "Enable",
+    remoteFeaturesDisable: "Disable",
+    remoteFeaturesRestartNotice: "Saved. Restart the daemon (below) for this to take effect.",
+    remoteFeaturesConfirmTitle: "Enable GitHub features?",
+    remoteFeaturesConfirmButton: "Enable",
+    remoteFeaturesConfirmBody1:
+      "This turns on Ferry's optional connection to GitHub's API. No network call happens until you also connect an account and use one of the two features below.",
+    remoteFeaturesConfirmBody2:
+      "Publish gist: puts an encrypted copy of one item on GitHub as a private gist. GitHub then learns the recipient's public key and the ciphertext size, and burn-after-read can no longer be honoured for that item once it leaves this machine.",
+    remoteFeaturesConfirmBody3:
+      "Fetch team roster: reads a signed roster file from a repository you choose, to preview and import.",
+    remoteFeaturesConfirmBody4: "You can disable this again at any time; it takes a daemon restart to apply either way.",
     processControl: "Process control",
     processControlHint:
       "Manual overrides for the daemon lifecycle. Use with care during active transfers.",

@@ -309,6 +309,24 @@ export const zh: Catalog = {
     themeSystem: "系统",
     themeLight: "浅色",
     themeDark: "深色",
+    remoteFeatures: "GitHub 连接",
+    remoteFeaturesHint:
+      "可选功能，默认关闭。启用后可将已密封的条目发布为私密 Gist，或获取已签名的团队名册 — 除此之外 Ferry 不会以任何方式联系 GitHub。",
+    remoteFeaturesState: "状态",
+    remoteFeaturesOnNotConnected: "已启用，未连接",
+    remoteFeaturesOnConnected: "已启用，以 {login} 身份连接",
+    remoteFeaturesEnable: "启用",
+    remoteFeaturesDisable: "停用",
+    remoteFeaturesRestartNotice: "已保存。请重启守护进程（见下方）以使更改生效。",
+    remoteFeaturesConfirmTitle: "启用 GitHub 功能？",
+    remoteFeaturesConfirmButton: "启用",
+    remoteFeaturesConfirmBody1:
+      "这将启用 Ferry 与 GitHub API 的可选连接。在您连接账户并使用以下两项功能之一之前，不会发生任何网络请求。",
+    remoteFeaturesConfirmBody2:
+      "发布 Gist：将某一条目的加密副本作为私密 Gist 放到 GitHub 上。此后 GitHub 会得知接收方的公钥和密文大小，并且一旦离开本机，该条目的“阅后即焚”将无法再被保证。",
+    remoteFeaturesConfirmBody3:
+      "获取团队名册：从您选择的仓库读取已签名的名册文件，用于预览和导入。",
+    remoteFeaturesConfirmBody4: "您可以随时再次停用此功能；无论哪种情况都需要重启守护进程才能生效。",
     processControl: "进程控制",
     processControlHint:
       "对守护进程生命周期的手动覆盖。在传输进行中请谨慎使用。",

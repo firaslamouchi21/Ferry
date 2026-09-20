@@ -309,6 +309,24 @@ export const ja: Catalog = {
     themeSystem: "システム",
     themeLight: "ライト",
     themeDark: "ダーク",
+    remoteFeatures: "GitHub 連携",
+    remoteFeaturesHint:
+      "任意機能です。既定でオフになっています。有効にすると、封印済みアイテムをプライベート Gist として公開したり、署名済みのチームロスターを取得できます。それ以外の目的で Ferry が GitHub に接続することはありません。",
+    remoteFeaturesState: "状態",
+    remoteFeaturesOnNotConnected: "有効、未接続",
+    remoteFeaturesOnConnected: "有効、{login} として接続済み",
+    remoteFeaturesEnable: "有効にする",
+    remoteFeaturesDisable: "無効にする",
+    remoteFeaturesRestartNotice: "保存しました。反映するにはデーモンを再起動してください（下記）。",
+    remoteFeaturesConfirmTitle: "GitHub 機能を有効にしますか？",
+    remoteFeaturesConfirmButton: "有効にする",
+    remoteFeaturesConfirmBody1:
+      "これは Ferry の GitHub API への任意接続を有効にします。アカウントを接続し、以下2つの機能のいずれかを使用するまで、ネットワーク通信は行われません。",
+    remoteFeaturesConfirmBody2:
+      "Gist の公開: 1件のアイテムの暗号化済みコピーを GitHub 上のプライベート Gist として配置します。これにより GitHub は受信者の公開鍵と暗号文のサイズを知ることになり、このマシンを離れた時点でそのアイテムの「開封後自動削除」は保証できなくなります。",
+    remoteFeaturesConfirmBody3:
+      "チームロスターの取得: 選択したリポジトリから署名済みのロスターファイルを読み込み、プレビューしてインポートします。",
+    remoteFeaturesConfirmBody4: "この設定はいつでも再度無効にできます。いずれの場合もデーモンの再起動が必要です。",
     processControl: "プロセス制御",
     processControlHint:
       "デーモンのライフサイクルの手動オーバーライド。アクティブな転送中は注意して使用してください。",
