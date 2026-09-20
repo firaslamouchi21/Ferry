@@ -126,13 +126,16 @@ mod tests {
     use std::io::Write;
 
     fn unique_socket_path() -> std::path::PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "ferry-local-ipc-test-{}-{}.sock",
+            "ferry-local-ipc-test-{}-{}-{}.sock",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            n
         ))
     }
 
