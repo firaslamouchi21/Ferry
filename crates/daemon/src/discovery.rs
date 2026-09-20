@@ -368,7 +368,7 @@ mod tests {
     fn an_unreachable_advertised_address_fails_fast_instead_of_stalling_the_discovery_thread() {
         let peer = DiscoveredPeer {
             fullname: "ghost._ferry._tcp.local.".into(),
-            host: "ghost-does-not-resolve.invalid.".into(),
+            host: "198.51.100.2".into(),
             addresses: vec!["198.51.100.1".parse().unwrap()],
             port: 47821,
             fingerprint: Some("ghost".into()),

@@ -3,7 +3,7 @@
   "displayName": "Ferry",
   "description": "Serverless peer-to-peer file, secret, and message transfer for developer teams",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "commonjs",
   "publisher": "ferry",
   "icon": "media/icon.png",

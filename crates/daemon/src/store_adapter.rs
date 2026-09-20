@@ -621,12 +621,26 @@ impl Store for SqliteStore {
     }
 
     fn remove_peer(&mut self, peer_id: &str) -> Result<(), StoreError> {
+        if ferry_store::roster::get_peer(&self.conn, peer_id)
+            .map_err(|e| StoreError(e.to_string()))?
+            .is_none()
+        {
+            return Err(StoreError(format!("no such peer {peer_id}")));
+        }
         ferry_store::roster::remove_peer(&self.conn, peer_id).map_err(|e| StoreError(e.to_string()))?;
         let _ = ferry_store::audit::append(&self.conn, "local", "peer.removed", Some(peer_id), "ok");
         Ok(())
     }
 
     fn abort_outbound(&mut self, item_id: &str, actor: &str) -> Result<(), StoreError> {
+        let item = ferry_store::outbound::get(&self.conn, item_id)
+            .map_err(|e| StoreError(e.to_string()))?
+            .ok_or_else(|| StoreError(format!("no outbound item {item_id}")))?;
+        ferry_core::state::TRANSFER_TRANSITIONS
+            .validate(item.state, TransferState::Failed)
+            .map_err(|_| StoreError(format!("item {item_id} is {:?} and can no longer be aborted", item.state)))?;
+        ferry_store::outbound::set_state(&self.conn, item_id, TransferState::Failed)
+            .map_err(|e| StoreError(e.to_string()))?;
         self.record_outbound_dropped(item_id, actor, "aborted")?;
         let _ = ferry_store::outbound::set_last_error(&self.conn, item_id, "you cancelled this transfer");
         if let Some(entry) = ferry_store::outbox::get_for_item(&self.conn, item_id)
@@ -838,6 +852,36 @@ mod tests {
     }
 
     #[test]
+    fn removing_an_unknown_peer_fails_and_writes_no_audit_row() {
+        let mut store = store_with_peer("peer-b", "bob");
+        assert!(store.remove_peer("peer-ghost").is_err());
+        assert_eq!(store.list_roster_peers().unwrap().len(), 1);
+        let audit = store.list_audit(10, None).unwrap();
+        assert!(!audit.iter().any(|e| e.kind == "peer.removed"));
+    }
+
+    #[test]
+    fn aborting_an_unknown_item_fails_and_writes_no_audit_row() {
+        let mut store = store_with_peer("peer-b", "bob");
+        assert!(store.abort_outbound("item-ghost", "local").is_err());
+        let audit = store.list_audit(10, None).unwrap();
+        assert!(!audit.iter().any(|e| e.kind == "item.outbox_expired"));
+    }
+
+    #[test]
+    fn a_delivered_item_cannot_be_aborted() {
+        let mut store = store_with_peer("peer-b", "bob");
+        let clock = ferry_core::expiry::ExpiryClock::new();
+        let id = enqueue_send(&mut store, &clock, &sample_item("peer-b"), "local").unwrap();
+        ferry_store::outbound::set_state(&store.conn, &id, TransferState::Delivered).unwrap();
+
+        assert!(store.abort_outbound(&id, "local").is_err());
+        assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Delivered));
+        let audit = store.list_audit(10, None).unwrap();
+        assert!(!audit.iter().any(|e| e.kind == "item.outbox_expired"));
+    }
+
+    #[test]
     fn abort_outbound_drops_the_outbox_entry_and_retry_requeues_it() {
         let mut store = store_with_peer("peer-b", "bob");
         let clock = ferry_core::expiry::ExpiryClock::new();
@@ -845,6 +889,7 @@ mod tests {
 
         store.abort_outbound(&id, "local").unwrap();
         assert!(ferry_store::outbox::list_for_peer(&store.conn, "peer-b").unwrap().is_empty());
+        assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Failed));
 
         store.retry_outbound(&id, "local").unwrap();
         assert_eq!(ferry_store::outbox::list_for_peer(&store.conn, "peer-b").unwrap().len(), 1);

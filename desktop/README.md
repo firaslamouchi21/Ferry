@@ -49,7 +49,7 @@ never collides with the CLI's `ferry` on `PATH`.
 ## Testing a package without installing it
 
 ```
-dpkg -x src-tauri/target/release/bundle/deb/Ferry_0.1.0_amd64.deb /tmp/ferry-pkg
+dpkg -x src-tauri/target/release/bundle/deb/Ferry_1.0.0_amd64.deb /tmp/ferry-pkg
 mkdir -p /tmp/ferry-data/ferry && printf 'identity_keystore = "file"\n' > /tmp/ferry-data/ferry/config.toml
 XDG_DATA_HOME=/tmp/ferry-data FERRY_IDENTITY_PASSPHRASE=test /tmp/ferry-pkg/usr/bin/ferry-desktop
 ferry --socket /tmp/ferry-data/ferry/ferry.sock status
