@@ -290,6 +290,12 @@ jobs:
             release/*.dmg
             release/*.msi
             release/*-setup.exe
+      - name: Delete any assets already on this release (avoid stale versioned filenames accumulating)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ github.ref_name }}" --json assets --jq '.assets[].name' 2>/dev/null | \
+            xargs -r -I{} gh release delete-asset "${{ github.ref_name }}" "{}" -y --repo "${{ github.repository }}" || true
       - uses: softprops/action-gh-release@v2
         with:
           files: release/*
