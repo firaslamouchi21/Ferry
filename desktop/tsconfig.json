@@ -9,6 +9,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
+    "types": ["vite/client"],
     "paths": {
       "@ferry/ui/*": ["../ui/src/*"],
       "@/*": ["../ui/src/*"],
