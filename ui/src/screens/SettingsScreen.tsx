@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Power, RotateCw } from "lucide-react";
-import { useDaemonStatus, useFerry, useIdentity } from "@/lib/query";
+import { useDaemonStatus, useFerry, useIdentity, useProviderStatus, useSetRemoteFeaturesEnabled } from "@/lib/query";
 import { Button, ConfirmDialog, CopyButton, Fingerprint } from "@/components";
 import { ACTIVE_LOCALES, LOCALE_LABELS, useI18n } from "@/lib/i18n";
 import { THEME_PREFS, useTheme } from "@/lib/theme";
@@ -9,10 +9,14 @@ import { Async, ScreenHeader } from "./parts";
 export function SettingsScreen() {
   const identity = useIdentity();
   const status = useDaemonStatus();
+  const providerStatus = useProviderStatus();
+  const setRemoteFeaturesEnabled = useSetRemoteFeaturesEnabled();
   const { client } = useFerry();
   const { locale, setLocale, t } = useI18n();
   const { pref: themePref, setPref: setThemePref } = useTheme();
   const [confirmQuit, setConfirmQuit] = useState(false);
+  const [confirmEnableRemote, setConfirmEnableRemote] = useState(false);
+  const [remoteFeaturesJustChanged, setRemoteFeaturesJustChanged] = useState(false);
 
   const canManageLifecycle = client.host !== "browser";
 
@@ -80,6 +84,38 @@ export function SettingsScreen() {
             </section>
 
             <section className="detail-section">
+              <h2>{t("settings.remoteFeatures")}</h2>
+              <p className="muted">{t("settings.remoteFeaturesHint")}</p>
+              <div className="settings-row">
+                <span className="detail-label">{t("settings.remoteFeaturesState")}</span>
+                <span className="settings-value">
+                  {providerStatus.data?.enabled
+                    ? providerStatus.data.connected
+                      ? t("settings.remoteFeaturesOnConnected", { login: providerStatus.data.login ?? "?" })
+                      : t("settings.remoteFeaturesOnNotConnected")
+                    : t("common.off")}
+                </span>
+              </div>
+              <div className="row-actions">
+                {providerStatus.data?.enabled ? (
+                  <Button
+                    disabled={setRemoteFeaturesEnabled.isPending}
+                    onClick={() => {
+                      void setRemoteFeaturesEnabled.mutateAsync(false).then(() => setRemoteFeaturesJustChanged(true));
+                    }}
+                  >
+                    {t("settings.remoteFeaturesDisable")}
+                  </Button>
+                ) : (
+                  <Button disabled={setRemoteFeaturesEnabled.isPending} onClick={() => setConfirmEnableRemote(true)}>
+                    {t("settings.remoteFeaturesEnable")}
+                  </Button>
+                )}
+              </div>
+              {remoteFeaturesJustChanged ? <p className="muted">{t("settings.remoteFeaturesRestartNotice")}</p> : null}
+            </section>
+
+            <section className="detail-section">
               <h2>{t("settings.processControl")}</h2>
               <p className="muted">{t("settings.processControlHint")}</p>
               <div className="row-actions">
@@ -133,6 +169,28 @@ export function SettingsScreen() {
           </>
         )}
       </Async>
+
+      {confirmEnableRemote ? (
+        <ConfirmDialog
+          title={t("settings.remoteFeaturesConfirmTitle")}
+          confirmLabel={t("settings.remoteFeaturesConfirmButton")}
+          body={
+            <>
+              <p>{t("settings.remoteFeaturesConfirmBody1")}</p>
+              <ul>
+                <li>{t("settings.remoteFeaturesConfirmBody2")}</li>
+                <li>{t("settings.remoteFeaturesConfirmBody3")}</li>
+              </ul>
+              <p>{t("settings.remoteFeaturesConfirmBody4")}</p>
+            </>
+          }
+          onCancel={() => setConfirmEnableRemote(false)}
+          onConfirm={() => {
+            setConfirmEnableRemote(false);
+            void setRemoteFeaturesEnabled.mutateAsync(true).then(() => setRemoteFeaturesJustChanged(true));
+          }}
+        />
+      ) : null}
 
       {confirmQuit ? (
         <ConfirmDialog

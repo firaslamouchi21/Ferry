@@ -309,6 +309,24 @@ export const es: Catalog = {
     themeSystem: "Sistema",
     themeLight: "Claro",
     themeDark: "Oscuro",
+    remoteFeatures: "Conexión con GitHub",
+    remoteFeaturesHint:
+      "Opcional. Desactivado por defecto. Permite publicar un elemento sellado como gist privado u obtener un roster de equipo firmado — Ferry nunca contacta con GitHub para nada más.",
+    remoteFeaturesState: "Estado",
+    remoteFeaturesOnNotConnected: "Activado, no conectado",
+    remoteFeaturesOnConnected: "Activado, conectado como {login}",
+    remoteFeaturesEnable: "Activar",
+    remoteFeaturesDisable: "Desactivar",
+    remoteFeaturesRestartNotice: "Guardado. Reinicia el daemon (abajo) para que esto tenga efecto.",
+    remoteFeaturesConfirmTitle: "¿Activar las funciones de GitHub?",
+    remoteFeaturesConfirmButton: "Activar",
+    remoteFeaturesConfirmBody1:
+      "Esto activa la conexión opcional de Ferry con la API de GitHub. No se realiza ninguna llamada de red hasta que además conectes una cuenta y uses una de las dos funciones siguientes.",
+    remoteFeaturesConfirmBody2:
+      "Publicar gist: coloca una copia cifrada de un elemento en GitHub como gist privado. GitHub conoce entonces la clave pública del destinatario y el tamaño del texto cifrado, y la destrucción tras lectura ya no puede garantizarse para ese elemento una vez que sale de esta máquina.",
+    remoteFeaturesConfirmBody3:
+      "Obtener roster de equipo: lee un archivo de roster firmado desde un repositorio que elijas, para previsualizarlo e importarlo.",
+    remoteFeaturesConfirmBody4: "Puedes desactivar esto de nuevo en cualquier momento; en ambos casos se necesita reiniciar el daemon.",
     processControl: "Control del proceso",
     processControlHint:
       "Anulaciones manuales del ciclo de vida del daemon. Úsalas con cuidado durante transferencias activas.",

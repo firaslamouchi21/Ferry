@@ -53,10 +53,11 @@ pub fn serve(
     pairing: &PairingRegistry,
     provider: &ProviderRegistry,
     source: &mut impl ferry_core::ports::OutboundSource,
+    data_dir: &Path,
 ) -> Result<(), IpcServerError> {
     loop {
         let stream = local_ipc::accept(listener).map_err(IpcServerError::Accept)?;
-        if handle_connection(stream, store, clock, source, runtime, event_bus, pairing, provider) {
+        if handle_connection(stream, store, clock, source, runtime, event_bus, pairing, provider, data_dir) {
             return Ok(());
         }
     }
@@ -84,6 +85,7 @@ fn handle_connection(
     event_bus: &EventBus,
     pairing: &PairingRegistry,
     provider: &ProviderRegistry,
+    data_dir: &Path,
 ) -> bool {
     if let Err(err) = local_ipc::set_timeouts(&stream, Some(IPC_CONNECTION_TIMEOUT)) {
         eprintln!("ferry-daemon: could not set IPC connection timeout: {err}");
@@ -118,6 +120,12 @@ fn handle_connection(
 
     if is_pairing_request(&envelope.request) {
         let response = handle_pairing(&envelope.request_id, envelope.request.clone(), pairing, store, event_bus);
+        write_response(&mut stream, &response);
+        return false;
+    }
+
+    if let IpcRequest::SetRemoteFeaturesEnabled { enabled } = envelope.request {
+        let response = handle_set_remote_features_enabled(&envelope.request_id, enabled, data_dir);
         write_response(&mut stream, &response);
         return false;
     }
@@ -304,6 +312,28 @@ fn handle_provider(
             Err(e) => provider_err(request_id, ErrorCode::Internal, e.to_string()),
         },
         _ => provider_err(request_id, ErrorCode::Internal, "not a provider request".into()),
+    }
+}
+
+fn write_remote_features_enabled(data_dir: &Path, enabled: bool) -> Result<(), String> {
+    let config_path = data_dir.join("config.toml");
+    let mut doc: toml::Table = match std::fs::read_to_string(&config_path) {
+        Ok(contents) => contents
+            .parse()
+            .map_err(|e| format!("failed to parse {}: {e}", config_path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(format!("failed to read {}: {e}", config_path.display())),
+    };
+    doc.insert("remote_features_enabled".to_string(), toml::Value::Boolean(enabled));
+    std::fs::create_dir_all(data_dir).map_err(|e| format!("failed to create {}: {e}", data_dir.display()))?;
+    let serialized = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&config_path, serialized).map_err(|e| format!("failed to write {}: {e}", config_path.display()))
+}
+
+fn handle_set_remote_features_enabled(request_id: &RequestId, enabled: bool, data_dir: &Path) -> IpcResponse {
+    match write_remote_features_enabled(data_dir, enabled) {
+        Ok(()) => ok(request_id, IpcResult::Ack),
+        Err(message) => provider_err(request_id, ErrorCode::Internal, message),
     }
 }
 
@@ -556,7 +586,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate()), &std::env::temp_dir()).unwrap();
         });
 
         let response = send_request(&socket_path, IpcRequest::Status, IPC_PROTOCOL_VERSION);
@@ -572,6 +602,45 @@ mod tests {
     }
 
     #[test]
+    fn set_remote_features_enabled_writes_config_toml_and_preserves_other_keys() {
+        let data_dir = std::env::temp_dir().join(format!("ferry-ipc-config-test-{}", uuid::Uuid::now_v7().simple()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(
+            data_dir.join("config.toml"),
+            "listen_port = 47821\nprovider_github_client_id = \"Ov23liExample\"\n",
+        )
+        .unwrap();
+
+        let socket_path = temp_socket_path();
+        let listener = bind(&socket_path).unwrap();
+        let data_dir_for_server = data_dir.clone();
+
+        let server_thread = std::thread::spawn(move || {
+            let mut store = FakeStore;
+            let clock = ExpiryClock::new();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate()), &data_dir_for_server).unwrap();
+        });
+
+        let response = send_request(
+            &socket_path,
+            IpcRequest::SetRemoteFeaturesEnabled { enabled: true },
+            IPC_PROTOCOL_VERSION,
+        );
+        assert!(matches!(response.outcome, IpcOutcome::Ok { value: IpcResult::Ack }), "{response:?}");
+
+        let written = std::fs::read_to_string(data_dir.join("config.toml")).unwrap();
+        let doc: toml::Table = written.parse().unwrap();
+        assert_eq!(doc["remote_features_enabled"].as_bool(), Some(true));
+        assert_eq!(doc["listen_port"].as_integer(), Some(47821));
+        assert_eq!(doc["provider_github_client_id"].as_str(), Some("Ov23liExample"));
+
+        send_request(&socket_path, IpcRequest::Quit, IPC_PROTOCOL_VERSION);
+        server_thread.join().unwrap();
+        let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
     fn a_client_speaking_the_wrong_ipc_protocol_version_gets_a_clear_error_not_a_dropped_connection() {
         let socket_path = temp_socket_path();
         let listener = bind(&socket_path).unwrap();
@@ -579,7 +648,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate()), &std::env::temp_dir()).unwrap();
         });
 
         let response = send_request(&socket_path, IpcRequest::Status, IPC_PROTOCOL_VERSION + 1);
@@ -608,7 +677,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = FakeStore;
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate()), &std::env::temp_dir()).unwrap();
         });
 
         let mut stream = local_ipc::connect(&socket_path).unwrap();
@@ -646,7 +715,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, store_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate()), &std::env::temp_dir()).unwrap();
             store
         });
 
@@ -724,7 +793,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, store_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &bus_for_server, &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &bus_for_server, &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate()), &std::env::temp_dir()).unwrap();
         });
 
         let mut sub = local_ipc::connect(&socket_path).unwrap();
@@ -803,7 +872,7 @@ mod tests {
         let server_thread = std::thread::spawn(move || {
             let mut store = SqliteStore::new(conn, payload_dir, ferry_crypto::identity::Identity::generate());
             let clock = ExpiryClock::new();
-            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate())).unwrap();
+            serve(&listener, &mut store, &clock, &RuntimeStatus::default(), &EventBus::new(), &crate::pairing::PairingRegistry::new(ferry_crypto::identity::Identity::generate()), &crate::provider::ProviderRegistry::new(ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"), false, None), &mut crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate()), &std::env::temp_dir()).unwrap();
         });
 
         let list_response = send_request(&socket_path, IpcRequest::InboxList, IPC_PROTOCOL_VERSION);

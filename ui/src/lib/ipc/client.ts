@@ -42,7 +42,7 @@ export type HostKind = "browser" | "vscode" | "mock";
 
 export function detectHost(): HostKind {
   if (typeof window !== "undefined" && window.acquireVsCodeApi) return "vscode";
-  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("mock")) return "mock";
+  if (import.meta.env.DEV && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("mock")) return "mock";
   return "browser";
 }
 
@@ -51,7 +51,8 @@ function makeTransport(host: HostKind): Transport {
     case "vscode":
       return new VsCodeTransport();
     case "mock":
-      return new MockTransport();
+      if (import.meta.env.DEV) return new MockTransport();
+      throw new Error("mock transport is unavailable outside development builds");
     default: {
       const proto = window.location.protocol === "https:" ? "wss" : "ws";
       const host = window.location.host || window.location.hostname || "localhost:5173";
@@ -243,6 +244,10 @@ export class FerryClient {
 
   async providerDisconnect(): Promise<void> {
     await this.call({ method: "provider_disconnect" });
+  }
+
+  async setRemoteFeaturesEnabled(enabled: boolean): Promise<void> {
+    await this.call({ method: "set_remote_features_enabled", params: { enabled } });
   }
 
   async gistPublish(itemId: string): Promise<RemoteJobView> {

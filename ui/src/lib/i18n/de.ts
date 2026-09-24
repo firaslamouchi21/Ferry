@@ -310,6 +310,24 @@ export const de: Catalog = {
     themeSystem: "System",
     themeLight: "Hell",
     themeDark: "Dunkel",
+    remoteFeatures: "GitHub-Verbindung",
+    remoteFeaturesHint:
+      "Optional. Standardmäßig deaktiviert. Ermöglicht das Veröffentlichen eines versiegelten Elements als privates Gist oder das Abrufen eines signierten Team-Rosters — Ferry kontaktiert GitHub sonst nie.",
+    remoteFeaturesState: "Status",
+    remoteFeaturesOnNotConnected: "Aktiviert, nicht verbunden",
+    remoteFeaturesOnConnected: "Aktiviert, verbunden als {login}",
+    remoteFeaturesEnable: "Aktivieren",
+    remoteFeaturesDisable: "Deaktivieren",
+    remoteFeaturesRestartNotice: "Gespeichert. Starten Sie den Daemon (unten) neu, damit dies wirksam wird.",
+    remoteFeaturesConfirmTitle: "GitHub-Funktionen aktivieren?",
+    remoteFeaturesConfirmButton: "Aktivieren",
+    remoteFeaturesConfirmBody1:
+      "Dies aktiviert Ferrys optionale Verbindung zur GitHub-API. Es erfolgt kein Netzwerkaufruf, bis Sie zusätzlich ein Konto verbinden und eine der beiden folgenden Funktionen nutzen.",
+    remoteFeaturesConfirmBody2:
+      "Gist veröffentlichen: legt eine verschlüsselte Kopie eines Elements als privates Gist auf GitHub ab. GitHub erfährt dabei den öffentlichen Schlüssel des Empfängers und die Größe des Chiffretexts; „Burn-after-read“ kann für dieses Element nicht mehr garantiert werden, sobald es diesen Rechner verlässt.",
+    remoteFeaturesConfirmBody3:
+      "Team-Roster abrufen: liest eine signierte Roster-Datei aus einem von Ihnen gewählten Repository zur Vorschau und zum Import.",
+    remoteFeaturesConfirmBody4: "Sie können dies jederzeit wieder deaktivieren; in beiden Fällen ist ein Neustart des Daemons erforderlich.",
     processControl: "Prozesssteuerung",
     processControlHint:
       "Manuelle Eingriffe in den Daemon-Lebenszyklus. Während aktiver Transfers mit Vorsicht verwenden.",

@@ -78,6 +78,7 @@ pub enum IpcRequest {
     RosterFetch { locator: String },
     RosterApplyRemote { locator: String },
     RemoteJobStatus { job_id: String },
+    SetRemoteFeaturesEnabled { enabled: bool },
     Subscribe,
 }
 

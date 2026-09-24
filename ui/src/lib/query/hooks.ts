@@ -105,6 +105,11 @@ export function useProviderDisconnect() {
   return useInvalidating(() => ferry.providerDisconnect(), [queryKeys.provider]);
 }
 
+export function useSetRemoteFeaturesEnabled() {
+  const ferry = useFerryClient();
+  return useInvalidating((enabled: boolean) => ferry.setRemoteFeaturesEnabled(enabled), [queryKeys.provider]);
+}
+
 export function useGistPublish() {
   const ferry = useFerryClient();
   return useInvalidating((itemId: string) => ferry.gistPublish(itemId), [queryKeys.audit]);

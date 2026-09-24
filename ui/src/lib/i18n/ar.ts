@@ -309,6 +309,24 @@ export const ar: Catalog = {
     themeSystem: "النظام",
     themeLight: "فاتح",
     themeDark: "داكن",
+    remoteFeatures: "اتصال GitHub",
+    remoteFeaturesHint:
+      "ميزة اختيارية، معطلة افتراضيًا. تتيح لك نشر عنصر مختوم كـ gist خاص أو جلب قائمة فريق موقّعة — لا يتصل Ferry بـ GitHub لأي غرض آخر أبدًا.",
+    remoteFeaturesState: "الحالة",
+    remoteFeaturesOnNotConnected: "مفعّل، غير متصل",
+    remoteFeaturesOnConnected: "مفعّل، متصل باسم {login}",
+    remoteFeaturesEnable: "تفعيل",
+    remoteFeaturesDisable: "تعطيل",
+    remoteFeaturesRestartNotice: "تم الحفظ. أعد تشغيل الخدمة (أدناه) لتفعيل هذا التغيير.",
+    remoteFeaturesConfirmTitle: "تفعيل ميزات GitHub؟",
+    remoteFeaturesConfirmButton: "تفعيل",
+    remoteFeaturesConfirmBody1:
+      "يؤدي هذا إلى تفعيل اتصال Ferry الاختياري بواجهة برمجة تطبيقات GitHub. لن يحدث أي اتصال بالشبكة حتى تقوم أيضًا بربط حساب واستخدام إحدى الميزتين أدناه.",
+    remoteFeaturesConfirmBody2:
+      "نشر gist‏: يضع نسخة مشفّرة من عنصر واحد على GitHub كـ gist خاص. عندئذٍ يعرف GitHub المفتاح العام للمستلم وحجم النص المشفّر، ولم يعد بالإمكان ضمان ميزة «الحرق بعد القراءة» لذلك العنصر بمجرد مغادرته لهذا الجهاز.",
+    remoteFeaturesConfirmBody3:
+      "جلب قائمة الفريق‏: يقرأ ملف قائمة موقّعًا من مستودع تختاره، لمعاينته واستيراده.",
+    remoteFeaturesConfirmBody4: "يمكنك تعطيل هذا مرة أخرى في أي وقت؛ ويتطلّب الأمر إعادة تشغيل الخدمة في كلتا الحالتين.",
     processControl: "التحكم بالعملية",
     processControlHint:
       "تجاوزات يدوية لدورة حياة الخدمة. استخدمها بحذر أثناء عمليات النقل النشطة.",
