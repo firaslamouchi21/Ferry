@@ -1,9 +1,8 @@
 name: CI
 
+# Automatic CI is disabled. Run manually from the Actions tab if needed.
 on:
-  push:
-    branches: [main,sandbox]
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
