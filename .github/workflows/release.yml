@@ -1,8 +1,7 @@
 name: Release
 
+# Automatic releases are disabled. Run manually from the Actions tab if needed.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
