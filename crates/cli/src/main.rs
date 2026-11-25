@@ -860,7 +860,37 @@ fn cmd_receive_list() -> Result<(), String> {
     }
 }
 
+fn inbox_item_is_file(item_id: &str) -> Result<bool, String> {
+    match ipc_call(IpcRequest::InboxList)? {
+        IpcResult::InboxList(items) => Ok(items
+            .iter()
+            .any(|item| item.item_id == item_id && item.kind == ferry_proto::states::ItemKind::File)),
+        other => Err(format!("unexpected response to InboxList: {other:?}")),
+    }
+}
+
+fn save_file_item(item_id: &str, path: &Path) -> Result<(), String> {
+    let destination = std::path::absolute(path)
+        .map_err(|source| format!("failed to resolve {}: {source}", path.display()))?;
+    match ipc_call(IpcRequest::SaveTo {
+        item_id: item_id.to_string(),
+        destination: destination.to_string_lossy().into_owned(),
+    })? {
+        IpcResult::Saved { size_bytes } => {
+            println!("wrote {size_bytes} bytes to {}", path.display());
+            Ok(())
+        }
+        other => Err(format!("unexpected response to SaveTo: {other:?}")),
+    }
+}
+
 fn cmd_receive_open(item_id: &str, out: Option<&Path>) -> Result<(), String> {
+    if let Some(path) = out {
+        if inbox_item_is_file(item_id)? {
+            return save_file_item(item_id, path);
+        }
+    }
+
     let content_base64 = match ipc_call(IpcRequest::Open { item_id: item_id.to_string() })? {
         IpcResult::Open { content_base64 } => content_base64,
         other => return Err(format!("unexpected response to Open: {other:?}")),

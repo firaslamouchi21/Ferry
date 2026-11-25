@@ -11,6 +11,8 @@ pub enum PayloadError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("the stored payload for {item_id} is damaged — {actual_size} bytes are present but they do not match what was received")]
+    Corrupt { item_id: String, actual_size: u64 },
     #[error("item id {0:?} is not a valid payload file name")]
     InvalidItemId(String),
     #[error("payload for {item_id} is malformed: a framed unit at byte {offset} declares {declared} bytes but only {available} remain")]
@@ -99,6 +101,98 @@ pub fn read_all(dir: &Path, item_id: &str) -> Result<Vec<u8>, PayloadError> {
     }
 }
 
+pub fn read_chunks(dir: &Path, item_id: &str, on_chunk: &mut dyn FnMut(&[u8])) -> Result<u64, PayloadError> {
+    let path = path_for(dir, item_id)?;
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(source) => return Err(PayloadError::Io { path, source }),
+    };
+    stream_chunks(file, &path, &mut |chunk| {
+        on_chunk(chunk);
+        Ok(())
+    })
+}
+
+fn stream_chunks(
+    mut file: File,
+    path: &Path,
+    on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), PayloadError>,
+) -> Result<u64, PayloadError> {
+    let mut total = 0u64;
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => return Ok(total),
+            Ok(n) => {
+                on_chunk(&buf[..n])?;
+                total += n as u64;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(source) => {
+                return Err(PayloadError::Io {
+                    path: path.to_path_buf(),
+                    source,
+                })
+            }
+        }
+    }
+}
+
+struct PartialFile<'a> {
+    path: &'a Path,
+    keep: bool,
+}
+
+impl Drop for PartialFile<'_> {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_file(self.path);
+        }
+    }
+}
+
+pub fn copy_verified(
+    dir: &Path,
+    item_id: &str,
+    destination: &Path,
+    on_chunk: &mut dyn FnMut(&[u8]),
+    is_intact: &mut dyn FnMut(u64) -> bool,
+) -> Result<u64, PayloadError> {
+    let io_at = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source: std::io::Error| PayloadError::Io { path, source }
+    };
+    let origin = path_for(dir, item_id)?;
+    let parent = destination
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let partial = parent.join(format!(".ferry-{item_id}.part"));
+
+    let mut out = File::create(&partial).map_err(io_at(&partial))?;
+    let mut guard = PartialFile { path: &partial, keep: false };
+    let written = match File::open(&origin) {
+        Ok(source) => stream_chunks(source, &origin, &mut |chunk| {
+            on_chunk(chunk);
+            out.write_all(chunk).map_err(io_at(&partial))
+        })?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(err) => return Err(io_at(&origin)(err)),
+    };
+    if !is_intact(written) {
+        return Err(PayloadError::Corrupt {
+            item_id: item_id.to_string(),
+            actual_size: written,
+        });
+    }
+    out.sync_all().map_err(io_at(&partial))?;
+    drop(out);
+    fs::rename(&partial, destination).map_err(io_at(destination))?;
+    guard.keep = true;
+    Ok(written)
+}
+
 pub fn append_framed(dir: &Path, item_id: &str, unit: &[u8]) -> Result<(), PayloadError> {
     let mut framed = Vec::with_capacity(4 + unit.len());
     framed.extend_from_slice(&(unit.len() as u32).to_be_bytes());
@@ -165,6 +259,32 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn copy_verified_writes_the_whole_file_and_leaves_nothing_behind_when_it_is_damaged() {
+        let dir = std::env::temp_dir().join(format!("ferry-copy-verified-{}", uuid::Uuid::now_v7()));
+        let out = dir.join("out");
+        fs::create_dir_all(&out).unwrap();
+        append(&dir, "item-1", b"hello ").unwrap();
+        append(&dir, "item-1", b"world").unwrap();
+
+        let target = out.join("saved.txt");
+        let mut seen = Vec::new();
+        let written = copy_verified(&dir, "item-1", &target, &mut |c| seen.extend_from_slice(c), &mut |n| n == 11).unwrap();
+        assert_eq!(written, 11);
+        assert_eq!(seen, b"hello world");
+        assert_eq!(fs::read(&target).unwrap(), b"hello world");
+
+        let bad = out.join("bad.txt");
+        let err = copy_verified(&dir, "item-1", &bad, &mut |_| {}, &mut |_| false).unwrap_err();
+        assert!(matches!(err, PayloadError::Corrupt { .. }));
+        let missing = copy_verified(&dir, "gone", &bad, &mut |_| {}, &mut |n| n == 11).unwrap_err();
+        assert!(matches!(missing, PayloadError::Corrupt { actual_size: 0, .. }));
+
+        let names: Vec<_> = fs::read_dir(&out).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("saved.txt")], "a failed save must leave no partial file");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -203,11 +203,61 @@ impl Store for SqliteStore {
                 hasher.update(plaintext.expose());
             }
         } else {
-            let bytes = ferry_store::payload::read_all(&self.payload_dir, item_id)
+            ferry_store::payload::read_chunks(&self.payload_dir, item_id, &mut |chunk| hasher.update(chunk))
                 .map_err(|e| StoreError(e.to_string()))?;
-            hasher.update(&bytes);
         }
         Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn inbound_origin(&self, item_id: &str) -> Result<Option<ferry_core::ports::InboundOrigin>, StoreError> {
+        let found = ferry_store::inbox::get(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        Ok(found.map(|item| ferry_core::ports::InboundOrigin {
+            peer_id: item.peer_id,
+            hash: item.hash,
+            size_bytes: item.size_bytes.max(0) as u64,
+            kind: item.kind,
+        }))
+    }
+
+    fn outbound_recipient(&self, item_id: &str) -> Result<Option<String>, StoreError> {
+        let found = ferry_store::outbound::get(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        Ok(found.map(|item| item.peer_id))
+    }
+
+    fn is_inbound_reopenable(&self, item_id: &str) -> Result<bool, StoreError> {
+        let found = ferry_store::inbox::get(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        Ok(found.map(|item| !item.is_burn_after_read).unwrap_or(false))
+    }
+
+    fn purge_inbound_payload(&mut self, item_id: &str) -> Result<(), StoreError> {
+        ferry_store::inbox::clear_wrapped_dek(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        ferry_store::payload::delete(&self.payload_dir, item_id).map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn reset_inbound_payload(&mut self, item_id: &str) -> Result<(), StoreError> {
+        ferry_store::payload::delete(&self.payload_dir, item_id).map_err(|e| StoreError(e.to_string()))?;
+        ferry_store::inbox::set_bytes_received_count(&self.conn, item_id, 0).map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn copy_inbound_file_to(&self, item_id: &str, destination: &std::path::Path) -> Result<u64, StoreError> {
+        let item = ferry_store::inbox::get(&self.conn, item_id)
+            .map_err(|e| StoreError(e.to_string()))?
+            .ok_or_else(|| StoreError("no such inbound item".into()))?;
+        if item.kind != ItemKind::File {
+            return Err(StoreError("only files can be saved to disk".into()));
+        }
+        let hasher = std::cell::RefCell::new(Sha256::new());
+        ferry_store::payload::copy_verified(
+            &self.payload_dir,
+            item_id,
+            destination,
+            &mut |chunk| hasher.borrow_mut().update(chunk),
+            &mut |written| {
+                written == item.size_bytes.max(0) as u64
+                    && hex::encode(hasher.borrow().clone().finalize()) == item.hash
+            },
+        )
+        .map_err(|e| StoreError(e.to_string()))
     }
 
     fn finalize_inbound_delivered(&mut self, item_id: &str) -> Result<(), StoreError> {
@@ -1772,5 +1822,171 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn saving_a_received_file_writes_it_whole_marks_it_opened_and_never_loses_it_on_failure() {
+        use ferry_core::ipc::{handle, RuntimeStatus};
+        use ferry_proto::ipc::{IpcOutcome, IpcRequest, IpcResult, RequestId, IPC_PROTOCOL_VERSION};
+
+        for is_burn_after_read in [false, true] {
+            let mut store = store_with_peer("peer-a", "alice");
+            let payload: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
+            let offer = Offer {
+                item_id: ferry_proto::ids::ItemId("item-1".into()),
+                kind: ItemKind::File,
+                name: "photo.bin".into(),
+                size_bytes: payload.len() as u64,
+                hash: hex::encode(Sha256::digest(&payload)),
+                ttl_secs: 600,
+                burn_after_read: is_burn_after_read,
+                notify_on_open: false,
+            };
+            store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+            store.append_inbound_chunk("item-1", 0, &payload).unwrap();
+            for state in [TransferState::Accepted, TransferState::Transferring] {
+                store.set_inbound_state("item-1", state).unwrap();
+            }
+            store.finalize_inbound_delivered("item-1").unwrap();
+
+            let clock = ferry_core::expiry::ExpiryClock::new();
+            let mut source = crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate());
+            let mut save = |store: &mut SqliteStore, destination: &std::path::Path| {
+                handle(
+                    store,
+                    &clock,
+                    &mut source,
+                    &RuntimeStatus::default(),
+                    RequestId("r".into()),
+                    IPC_PROTOCOL_VERSION,
+                    IpcRequest::SaveTo {
+                        item_id: "item-1".into(),
+                        destination: destination.to_string_lossy().into_owned(),
+                    },
+                )
+                .outcome
+            };
+
+            let out = temp_payload_dir();
+            let unwritable = out.join("no-such-folder").join("photo.bin");
+            assert!(matches!(save(&mut store, &unwritable), IpcOutcome::Err { .. }));
+            assert_eq!(
+                store.get_inbound_state("item-1").unwrap(),
+                Some(TransferState::Delivered),
+                "a failed save must leave the item openable, burn or not"
+            );
+            assert_eq!(store.read_inbound_plaintext("item-1").unwrap(), payload);
+            assert!(matches!(save(&mut store, std::path::Path::new("relative.bin")), IpcOutcome::Err { .. }));
+
+            std::fs::create_dir_all(&out).unwrap();
+            let target = out.join("photo.bin");
+            assert!(matches!(
+                save(&mut store, &target),
+                IpcOutcome::Ok { value: IpcResult::Saved { size_bytes } } if size_bytes == payload.len() as u64
+            ));
+            assert_eq!(std::fs::read(&target).unwrap(), payload);
+            assert_eq!(store.get_inbound_state("item-1").unwrap(), Some(TransferState::Opened));
+
+            let second = save(&mut store, &out.join("again.bin"));
+            assert_eq!(
+                matches!(second, IpcOutcome::Ok { .. }),
+                !is_burn_after_read,
+                "an ordinary file can be saved again, a burned one cannot"
+            );
+            std::fs::remove_dir_all(&out).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_received_file_whose_payload_vanished_is_reported_damaged_not_saved_empty() {
+        let mut store = store_with_peer("peer-a", "alice");
+        let offer = Offer {
+            item_id: ferry_proto::ids::ItemId("item-1".into()),
+            kind: ItemKind::File,
+            name: "gone.txt".into(),
+            size_bytes: 5,
+            hash: hex::encode(Sha256::digest(b"hello")),
+            ttl_secs: 600,
+            burn_after_read: false,
+            notify_on_open: false,
+        };
+        store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+        let out = temp_payload_dir();
+        std::fs::create_dir_all(&out).unwrap();
+        assert!(store.copy_inbound_file_to("item-1", &out.join("gone.txt")).is_err());
+        assert!(store.read_inbound_plaintext("item-1").is_err());
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn a_secret_is_never_written_to_disk_by_a_save_request() {
+        let mut store = store_with_peer("peer-a", "alice");
+        let offer = Offer {
+            item_id: ferry_proto::ids::ItemId("item-1".into()),
+            kind: ItemKind::Secret,
+            name: ".env".into(),
+            size_bytes: 1,
+            hash: hex::encode(Sha256::digest(b"x")),
+            ttl_secs: 600,
+            burn_after_read: false,
+            notify_on_open: false,
+        };
+        store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+        let target = std::env::temp_dir().join(format!("ferry-secret-{}", uuid::Uuid::now_v7()));
+        assert!(store.copy_inbound_file_to("item-1", &target).is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn expiring_an_item_destroys_its_key_and_payload() {
+        let mut store = store_with_peer("peer-a", "alice");
+        let offer = Offer {
+            item_id: ferry_proto::ids::ItemId("item-1".into()),
+            kind: ItemKind::Secret,
+            name: ".env".into(),
+            size_bytes: 1,
+            hash: hex::encode(Sha256::digest(b"x")),
+            ttl_secs: 0,
+            burn_after_read: false,
+            notify_on_open: false,
+        };
+        store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+        store.append_inbound_chunk("item-1", 0, b"x").unwrap();
+        store.finalize_inbound_delivered("item-1").unwrap();
+        let clock = ferry_core::expiry::ExpiryClock::new();
+        store.set_inbound_expiry("item-1", &clock.compute_deadline(0)).unwrap();
+
+        assert!(ferry_core::transfer::expire_if_due(&mut store, &clock, "item-1").unwrap());
+        assert_eq!(store.get_inbound_state("item-1").unwrap(), Some(TransferState::Expired));
+        assert!(store.read_inbound_plaintext("item-1").is_err());
+        assert!(!store.payload_dir.join("item-1.bin").exists());
+    }
+
+    #[test]
+    fn an_opened_ordinary_file_is_purged_from_disk_once_its_ttl_passes_but_a_live_one_is_kept() {
+        let mut store = store_with_peer("peer-a", "alice");
+        let clock = ferry_core::expiry::ExpiryClock::new();
+        for (id, ttl) in [("item-live", 600u32), ("item-old", 0)] {
+            let offer = Offer {
+                item_id: ferry_proto::ids::ItemId(id.into()),
+                kind: ItemKind::File,
+                name: "f.txt".into(),
+                size_bytes: 1,
+                hash: hex::encode(Sha256::digest(b"x")),
+                ttl_secs: ttl,
+                burn_after_read: false,
+                notify_on_open: false,
+            };
+            store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+            store.append_inbound_chunk(id, 0, b"x").unwrap();
+            store.finalize_inbound_delivered(id).unwrap();
+            store.set_inbound_expiry(id, &clock.compute_deadline(ttl)).unwrap();
+            store.mark_inbound_opened(id).unwrap();
+        }
+        ferry_core::ipc::expire_due_inbox_items(&mut store, &clock).unwrap();
+        assert!(store.payload_dir.join("item-live.bin").exists());
+        assert!(!store.payload_dir.join("item-old.bin").exists());
+        assert_eq!(store.get_inbound_state("item-old").unwrap(), Some(TransferState::Opened));
     }
 }

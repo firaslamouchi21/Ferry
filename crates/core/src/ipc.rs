@@ -142,6 +142,7 @@ pub fn handle(
             Err(err) => transfer_error_outcome(&item_id, err),
         },
         IpcRequest::Open { item_id } => open_outcome(store, clock, &item_id),
+        IpcRequest::SaveTo { item_id, destination } => save_outcome(store, clock, &item_id, Path::new(&destination)),
         IpcRequest::ConfirmOpened { item_id } => confirm_opened_outcome(store, clock, &item_id),
         IpcRequest::ExportSealed { item_id } => export_sealed_outcome(store, &item_id),
         IpcRequest::ImportSealed { blob_base64 } => import_sealed_outcome(store, clock, &blob_base64),
@@ -439,6 +440,22 @@ fn open_outcome(store: &mut impl Store, clock: &ExpiryClock, item_id: &str) -> I
         return transfer_error_outcome(item_id, err);
     }
 
+    match store.inbound_origin(item_id) {
+        Ok(Some(origin)) if origin.size_bytes > MAX_INLINE_OPEN_BYTES => {
+            return IpcOutcome::Err {
+                error: FerryError {
+                    code: ErrorCode::FrameTooLarge,
+                    message: format!(
+                        "item {item_id} is {} bytes — too large to open inline, save it to a file instead",
+                        origin.size_bytes
+                    ),
+                },
+            }
+        }
+        Ok(_) => {}
+        Err(err) => return internal_error(err.to_string()),
+    }
+
     match store.read_inbound_plaintext(item_id) {
         Ok(plaintext) => IpcOutcome::Ok {
             value: IpcResult::Open {
@@ -446,6 +463,85 @@ fn open_outcome(store: &mut impl Store, clock: &ExpiryClock, item_id: &str) -> I
             },
         },
         Err(err) => internal_error(err.to_string()),
+    }
+}
+
+fn save_outcome(store: &mut impl Store, clock: &ExpiryClock, item_id: &str, destination: &Path) -> IpcOutcome {
+    if let Err(err) = check_openable(store, clock, item_id) {
+        return transfer_error_outcome(item_id, err);
+    }
+    match store.inbound_origin(item_id) {
+        Ok(Some(origin)) if origin.kind == ItemKind::File => {}
+        Ok(_) => {
+            return IpcOutcome::Err {
+                error: FerryError {
+                    code: ErrorCode::ItemRejectedByPolicy,
+                    message: format!("item {item_id} is not a file — only files can be saved to disk"),
+                },
+            }
+        }
+        Err(err) => return internal_error(err.to_string()),
+    }
+    if !destination.is_absolute() || destination.file_name().is_none() {
+        return internal_error("the save destination must be an absolute file path".into());
+    }
+
+    let size_bytes = match store.copy_inbound_file_to(item_id, destination) {
+        Ok(size_bytes) => size_bytes,
+        Err(err) => return internal_error(format!("{err} — the item was left unopened, safe to retry")),
+    };
+    match open_item_locally(store, clock, item_id) {
+        Ok(()) => IpcOutcome::Ok {
+            value: IpcResult::Saved { size_bytes },
+        },
+        Err(err) => transfer_error_outcome(item_id, err),
+    }
+}
+
+fn sent_retry_outcome(
+    store: &mut impl Store,
+    clock: &ExpiryClock,
+    source: &mut impl OutboundSource,
+    item_id: &str,
+) -> IpcOutcome {
+    let item = match store.get_outbound_item(item_id) {
+        Ok(Some(item)) => item,
+        Ok(None) => return internal_error(format!("no outbound item {item_id}")),
+        Err(err) => return internal_error(err.to_string()),
+    };
+    match store.get_outbound_state(item_id) {
+        Ok(Some(TransferState::Failed | TransferState::Expired)) => {}
+        Ok(state) => {
+            return IpcOutcome::Err {
+                error: FerryError {
+                    code: ErrorCode::IllegalStateTransition,
+                    message: format!("item {item_id} is {state:?} — only a failed or expired item can be retried"),
+                },
+            }
+        }
+        Err(err) => return internal_error(err.to_string()),
+    }
+
+    let outcome = send_outcome(
+        store,
+        clock,
+        source,
+        SendRequest {
+            peer_id: item.peer_id,
+            source_path: item.source_path,
+            name: item.name,
+            kind: item.kind,
+            ttl_secs: item.ttl_secs,
+            is_burn_after_read: item.is_burn_after_read,
+            notify_on_open: item.notify_on_open,
+        },
+    );
+    match outcome {
+        IpcOutcome::Ok { .. } => match store.retry_outbound(item_id, "local") {
+            Ok(()) => IpcOutcome::Ok { value: IpcResult::Ack },
+            Err(err) => internal_error(err.to_string()),
+        },
+        err => err,
     }
 }
 

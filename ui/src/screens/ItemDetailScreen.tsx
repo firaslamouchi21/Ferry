@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft } from "lucide-react";
 import {
   useAuditLog,
@@ -7,11 +8,16 @@ import {
   useFerryClient,
   useInboxItem,
   useTransferProgress,
+  queryKeys,
 } from "@/lib/query";
 import { Button, ConfirmDialog, ErrorState, MaskedValue, ProgressBar, Skeleton, StateBadge } from "@/components";
 import { num, optNum, type TransferState } from "@/lib/ipc";
 import { decodeBase64, decodeBase64Bytes, formatClock, useFormat } from "@/lib/format";
 import { useT, useTParts } from "@/lib/i18n";
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 const LIFECYCLE: TransferState[] = ["offered", "accepted", "delivered", "opened"];
 
@@ -30,6 +36,8 @@ export function ItemDetailScreen() {
   const [content, setContent] = useState<string | null>(null);
   const [confirmBurn, setConfirmBurn] = useState(false);
   const [saveNote, setSaveNote] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const client = useQueryClient();
 
   if (item.isLoading) {
     return (
@@ -57,6 +65,8 @@ export function ItemDetailScreen() {
   }
 
   const it = item.data;
+  const pastExpiry = it.expires_at_millis != null && num(it.expires_at_millis) <= Date.now();
+  const openable = it.state === "delivered" || (it.state === "opened" && !it.is_burn_after_read && !pastExpiry);
   const itemAudit = (audit.data ?? []).filter((e) => e.item_id === it.item_id);
   const lifecycleAt = (state: TransferState) =>
     itemAudit.find((e) => e.kind.includes(state))?.occurred_at_millis ?? null;
@@ -70,29 +80,37 @@ export function ItemDetailScreen() {
       await saveToDisk();
       return;
     }
-    const b64 = await ferry.open(it.item_id);
-    setContent(decodeBase64(b64));
-    await confirmOpened.mutateAsync(it.item_id);
+    setSaveNote(null);
+    try {
+      setContent(decodeBase64(await ferry.open(it.item_id)));
+    } catch (err) {
+      setSaveNote(t("item.saveFailed", { error: errorText(err) }));
+      return;
+    }
+    if (it.state !== "opened") await confirmOpened.mutateAsync(it.item_id).catch(() => undefined);
   }
 
   async function saveToDisk() {
     setSaveNote(null);
-    let opened = false;
+    setSaving(true);
     try {
-      const saved = await ferry.saveFile(it.name, async () => {
-        const b64 = await ferry.open(it.item_id);
-        opened = true;
-        return decodeBase64Bytes(b64);
-      });
-      if (saved) {
-        await confirmOpened.mutateAsync(it.item_id);
-        setSaveNote(t("item.saved", { name: it.name }));
-      } else if (opened) {
-        await confirmOpened.mutateAsync(it.item_id);
+      if (ferry.canPickSavePath()) {
+        const target = await ferry.pickSavePath(it.name);
+        if (!target) return;
+        await ferry.saveTo(it.item_id, target.path);
+        await client.invalidateQueries({ queryKey: queryKeys.inbox });
+        await client.invalidateQueries({ queryKey: queryKeys.audit });
+        setSaveNote(t("item.saved", { name: target.name }));
+        return;
       }
+      const saved = await ferry.saveFile(it.name, async () => decodeBase64Bytes(await ferry.open(it.item_id)));
+      if (!saved) return;
+      setSaveNote(t("item.saved", { name: it.name }));
+      if (it.state !== "opened") await confirmOpened.mutateAsync(it.item_id).catch(() => undefined);
     } catch (err) {
-      setSaveNote(t("item.saveFailed", { error: (err as Error).message ?? String(err) }));
-      if (opened) await confirmOpened.mutateAsync(it.item_id);
+      setSaveNote(t("item.saveFailed", { error: errorText(err) }));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -160,8 +178,8 @@ export function ItemDetailScreen() {
       <section className="detail-section">
         <div className="detail-section-head">
           <h2>{t("item.payloadContent")}</h2>
-          {content == null && (it.state === "delivered" || it.state === "opened") ? (
-            <Button variant="primary" onClick={() => reveal()}>
+          {content == null && openable ? (
+            <Button variant="primary" disabled={saving} onClick={() => void reveal()}>
               {it.kind === "secret" ? t("item.decrypt") : it.kind === "file" ? t("item.save") : t("common.open")}
             </Button>
           ) : null}
@@ -169,7 +187,7 @@ export function ItemDetailScreen() {
         {saveNote ? <p className="muted mono">{saveNote}</p> : null}
         {content == null ? (
           <p className="muted">
-            {it.state === "delivered" || it.state === "opened"
+            {openable
               ? it.kind === "file"
                 ? t("item.saveHint")
                 : t("item.heldSealed")

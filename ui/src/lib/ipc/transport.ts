@@ -19,6 +19,23 @@ export interface Transport {
   startDaemon(): Promise<void>;
   pickFile(): Promise<PickedFile | null>;
   saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean>;
+  pickSavePath?(name: string): Promise<PickedFile | null>;
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const BULK_REQUEST_TIMEOUT_MS = 10 * 60_000;
+const BULK_METHODS = new Set<IpcEnvelope["request"]["method"]>([
+  "send",
+  "send_inline",
+  "sent_retry",
+  "open",
+  "save_to",
+  "export_sealed",
+  "import_sealed",
+]);
+
+export function requestTimeoutMs(envelope: IpcEnvelope): number {
+  return BULK_METHODS.has(envelope.request.method) ? BULK_REQUEST_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS;
 }
 
 type BridgeMessage =
@@ -37,8 +54,10 @@ export function downloadBytes(name: string, bytes: Uint8Array): boolean {
     const a = document.createElement("a");
     a.href = url;
     a.download = name;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
     return true;
   } catch {
     return false;
@@ -232,7 +251,7 @@ export class WebSocketTransport implements Transport {
           this.pending.delete(envelope.request_id);
           this.rejecters.delete(envelope.request_id);
         }
-      }, 15000);
+      }, requestTimeoutMs(envelope));
     });
   }
 
@@ -340,22 +359,28 @@ export class VsCodeTransport implements Transport {
           this.daemonStart.reject(new Error("starting the daemon timed out"));
           this.daemonStart = null;
         }
-      }, 12000);
+      }, 20_000);
+    });
+  }
+
+  private pick(message: { kind: "pick-file" } | { kind: "pick-save-path"; name: string }): Promise<PickedFile | null> {
+    this.filePick?.(null);
+    return new Promise((resolve) => {
+      this.filePick = resolve;
+      this.api.postMessage(message);
     });
   }
 
   pickFile(): Promise<PickedFile | null> {
-    return new Promise((resolve) => {
-      this.filePick = resolve;
-      this.api.postMessage({ kind: "pick-file" });
-    });
+    return this.pick({ kind: "pick-file" });
+  }
+
+  pickSavePath(name: string): Promise<PickedFile | null> {
+    return this.pick({ kind: "pick-save-path", name });
   }
 
   async saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean> {
-    const target = await new Promise<PickedFile | null>((resolve) => {
-      this.filePick = resolve;
-      this.api.postMessage({ kind: "pick-save-path", name });
-    });
+    const target = await this.pickSavePath(name);
     if (!target) return false;
     const bytes = await produce();
     let binary = "";
@@ -379,7 +404,7 @@ export class VsCodeTransport implements Transport {
           this.pending.delete(envelope.request_id);
           this.rejecters.delete(envelope.request_id);
         }
-      }, 15000);
+      }, requestTimeoutMs(envelope));
     });
   }
 

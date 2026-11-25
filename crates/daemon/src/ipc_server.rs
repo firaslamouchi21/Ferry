@@ -452,7 +452,7 @@ fn event_for(request: &IpcRequest, response: &IpcResponse) -> Option<IpcEvent> {
         (IpcRequest::Send { .. }, IpcResult::Send { item_id }) => {
             (IpcResource::Transfer, Some(item_id.clone()))
         }
-        (IpcRequest::ConfirmOpened { item_id }, _) => (IpcResource::Transfer, Some(item_id.clone())),
+        (IpcRequest::ConfirmOpened { item_id }, _) | (IpcRequest::SaveTo { item_id, .. }, _) => (IpcResource::Transfer, Some(item_id.clone())),
         (IpcRequest::ImportSealed { .. }, IpcResult::ImportSealed(view)) => {
             (IpcResource::Transfer, Some(view.item_id.clone()))
         }

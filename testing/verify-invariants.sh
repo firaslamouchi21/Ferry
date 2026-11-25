@@ -307,6 +307,73 @@ if [ "$MDNS_OK" = 1 ]; then
   else
     bad "transfer never completed after the receiver was killed and restarted"
   fi
+  stop_peer a
+  start_peer a "$PORT_A"
+  for _ in $(seq 1 40); do peer a "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+fi
+
+if [ "$MDNS_OK" = 1 ]; then
+  echo
+  echo "== a file larger than one IPC frame is saved whole, a failed save loses nothing, and it can be saved again =="
+  head -c 70000000 /dev/urandom > "$ROOT/large.bin"
+  LWANT=$(sha256sum "$ROOT/large.bin" | awk '{print $1}')
+  peer a "$CLI" send "$BID" "$ROOT/large.bin" --ttl 3600 >/dev/null 2>&1 || bad "large send failed to queue"
+  if item=$(wait_delivered b large.bin); then
+    peer b "$CLI" receive open "$item" --out "$ROOT/no-such-folder/large.got" >/dev/null 2>&1 \
+      && bad "a save into a missing folder reported success" || ok "a save into a missing folder fails"
+    peer b "$CLI" receive open "$item" --out "$ROOT/large.got" >/dev/null 2>&1
+    [ "$(sha256sum "$ROOT/large.got" 2>/dev/null | awk '{print $1}')" = "$LWANT" ] \
+      && ok "the 70 MB file was still there and saved intact" || bad "the large file could not be saved"
+    peer b "$CLI" receive open "$item" --out "$ROOT/large.again" >/dev/null 2>&1
+    [ "$(sha256sum "$ROOT/large.again" 2>/dev/null | awk '{print $1}')" = "$LWANT" ] \
+      && ok "an ordinary file can be saved a second time" || bad "a second save of an ordinary file failed"
+  else
+    bad "large file not delivered"
+  fi
+
+  echo
+  echo "== notify-on-open: the item is delivered at once and turns opened only after it is opened =="
+  printf 'notify-%s\n' "$(date +%s%N)" > "$ROOT/notify.txt"
+  peer a "$CLI" send "$BID" "$ROOT/notify.txt" --ttl 3600 --notify-on-open >/dev/null 2>&1 || bad "notify send failed to queue"
+  if item=$(wait_delivered b notify.txt); then
+    sleep 2
+    peer a "$CLI" sent list 2>/dev/null | grep -i notify.txt | grep -qi delivered \
+      && ok "the sender sees delivered without waiting for an open" || bad "the sender is stuck on a notify-on-open item"
+    peer b "$CLI" receive open "$item" --out "$ROOT/notify.got" >/dev/null 2>&1
+    opened=""
+    for _ in $(seq 1 "$RECV_TIMEOUT"); do
+      peer a "$CLI" sent list 2>/dev/null | grep -i notify.txt | grep -qi opened && { opened=1; break; }
+      sleep 1
+    done
+    [ -n "$opened" ] && ok "the open receipt reached the sender" || bad "the open receipt never reached the sender"
+  else
+    bad "notify-on-open item not delivered"
+  fi
+
+  echo
+  echo "== a file edited after it was queued is refused with a reason, and retry sends the current version =="
+  stop_peer b
+  echo "version one" > "$ROOT/edited.txt"
+  peer a "$CLI" send "$BID" "$ROOT/edited.txt" --ttl 3600 >/dev/null 2>&1
+  echo "version two, longer" > "$ROOT/edited.txt"
+  start_peer b "$PORT_B"
+  for _ in $(seq 1 40); do peer b "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+  failed=""
+  for _ in $(seq 1 "$RECV_TIMEOUT"); do
+    failed=$(peer a "$CLI" sent list 2>/dev/null | grep -i edited.txt | grep -i failed | awk '{print $1}' | head -1 || true)
+    [ -n "$failed" ] && break
+    sleep 1
+  done
+  [ -n "$failed" ] && ok "the stale queue entry failed instead of corrupting the receiver" || bad "an edited source was never reported"
+  if [ -n "$failed" ]; then
+    peer a "$CLI" sent retry "$failed" >/dev/null 2>&1 || bad "retry of the failed item was rejected"
+    if item=$(wait_delivered b edited.txt); then
+      peer b "$CLI" receive open "$item" --out "$ROOT/edited.got" >/dev/null 2>&1
+      cmp -s "$ROOT/edited.txt" "$ROOT/edited.got" && ok "retry delivered the current version" || bad "retry delivered the wrong content"
+    else
+      bad "retry never delivered"
+    fi
+  fi
 fi
 
 if [ "$MDNS_OK" = 1 ]; then
