@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, TcpListener, TcpStream, UdpSocket};
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::io::ErrorKind;
+use std::time::{Duration, Instant};
 
 use ferry_core::pairing::{generate_code, run_pairing_exchange, PairingOutcome};
 use ferry_core::ports::NewRosterPeer;
@@ -11,6 +12,8 @@ use ferry_proto::ipc::{PairBeginView, PairMode, PairPhase, PairStatusView};
 
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(300);
 const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
+const LISTEN_TIMEOUT: Duration = Duration::from_secs(600);
+const LISTEN_POLL: Duration = Duration::from_millis(100);
 
 struct Slot {
     phase: PairPhase,
@@ -20,7 +23,7 @@ struct Slot {
     error: Option<String>,
     answer_tx: Option<SyncSender<bool>>,
     outcome: Option<PairingOutcome>,
-    persisted: bool,
+    cancelled: bool,
 }
 
 impl Slot {
@@ -33,7 +36,7 @@ impl Slot {
             error: None,
             answer_tx: None,
             outcome: None,
-            persisted: false,
+            cancelled: false,
         }
     }
 
@@ -85,9 +88,7 @@ impl PairingRegistry {
                 PairMode::Listen { display_name } | PairMode::Connect { display_name, .. } => display_name.clone(),
             };
             let stream: Result<TcpStream, String> = match (&mode_thread, listener) {
-                (PairMode::Listen { .. }, Some(l)) => {
-                    l.accept().map(|(s, _)| s).map_err(|e| format!("no peer connected: {e}"))
-                }
+                (PairMode::Listen { .. }, Some(l)) => accept_until_cancelled(&l, &slot_thread),
                 (PairMode::Connect { addr, .. }, _) => {
                     match ferry_net::addr::normalize_host_port(addr) {
                         Ok(target) => connect_with_timeout(&target),
@@ -128,7 +129,6 @@ impl PairingRegistry {
                     s.peer_fingerprint = Some(outcome.peer_id.clone());
                     s.peer_display_name = Some(outcome.display_name.clone());
                     s.outcome = Some(outcome);
-                    s.phase = PairPhase::Done;
                 }
                 Err(e) => fail(&slot_thread, e),
             }
@@ -150,20 +150,32 @@ impl PairingRegistry {
         Some(view)
     }
 
-    pub fn take_pending_persist(&self, pairing_id: &str) -> Option<NewRosterPeer> {
-        let slot = self.slots.lock().unwrap().get(pairing_id).cloned()?;
-        let mut s = slot.lock().unwrap();
-        if s.persisted {
-            return None;
+    pub fn persist_pending(&self, save: &mut dyn FnMut(&NewRosterPeer) -> Result<(), String>) -> bool {
+        let slots: Vec<_> = self.slots.lock().unwrap().values().cloned().collect();
+        let mut saved_any = false;
+        for slot in slots {
+            let mut s = slot.lock().unwrap();
+            let Some(outcome) = s.outcome.take() else {
+                continue;
+            };
+            let peer = NewRosterPeer {
+                peer_id: outcome.peer_id,
+                display_name: outcome.display_name,
+                signing_key_hex: outcome.signing_key_hex,
+                sealing_key: outcome.sealing_key,
+            };
+            match save(&peer) {
+                Ok(()) => {
+                    s.phase = PairPhase::Done;
+                    saved_any = true;
+                }
+                Err(err) => {
+                    s.phase = PairPhase::Failed;
+                    s.error = Some(format!("pairing succeeded but the peer could not be saved: {err}"));
+                }
+            }
         }
-        let outcome = s.outcome.take()?;
-        s.persisted = true;
-        Some(NewRosterPeer {
-            peer_id: outcome.peer_id,
-            display_name: outcome.display_name,
-            signing_key_hex: outcome.signing_key_hex,
-            sealing_key: outcome.sealing_key,
-        })
+        saved_any
     }
 
     pub fn confirm(&self, pairing_id: &str, accept: bool) -> Result<(), String> {
@@ -186,11 +198,39 @@ impl PairingRegistry {
 
     pub fn cancel(&self, pairing_id: &str) {
         if let Some(slot) = self.slots.lock().unwrap().remove(pairing_id) {
-            let tx = slot.lock().unwrap().answer_tx.take();
+            let tx = {
+                let mut s = slot.lock().unwrap();
+                s.cancelled = true;
+                s.answer_tx.take()
+            };
             if let Some(tx) = tx {
                 let _ = tx.send(false);
             }
         }
+    }
+}
+
+fn accept_until_cancelled(listener: &TcpListener, slot: &Arc<Mutex<Slot>>) -> Result<TcpStream, String> {
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("could not prepare the pairing listener: {e}"))?;
+    let deadline = Instant::now() + LISTEN_TIMEOUT;
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+                return Ok(stream);
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted | ErrorKind::ConnectionAborted) => {}
+            Err(e) => return Err(format!("no peer connected: {e}")),
+        }
+        if slot.lock().unwrap().cancelled {
+            return Err("pairing was cancelled".into());
+        }
+        if Instant::now() >= deadline {
+            return Err("no peer connected before the pairing code expired".into());
+        }
+        std::thread::sleep(LISTEN_POLL);
     }
 }
 
@@ -267,24 +307,28 @@ mod tests {
         reg_a.confirm(&begin_a.pairing_id, true).unwrap();
         reg_b.confirm(&begin_b.pairing_id, true).unwrap();
 
-        let wait_for_done = |reg: &PairingRegistry, id: &str| {
+        let wait_for_done = |reg: &PairingRegistry, id: &str| -> Vec<NewRosterPeer> {
+            let mut saved = Vec::new();
             for _ in 0..500 {
+                reg.persist_pending(&mut |peer| {
+                    saved.push(peer.clone());
+                    Ok(())
+                });
                 match reg.status_view(id).unwrap().phase {
-                    PairPhase::Done => return,
+                    PairPhase::Done => return saved,
                     PairPhase::Failed => panic!("pairing failed after confirmation"),
                     _ => std::thread::sleep(Duration::from_millis(10)),
                 }
             }
             panic!("pairing never completed");
         };
-        wait_for_done(&reg_a, &begin_a.pairing_id);
-        wait_for_done(&reg_b, &begin_b.pairing_id);
+        let a_saved = wait_for_done(&reg_a, &begin_a.pairing_id);
+        let b_saved = wait_for_done(&reg_b, &begin_b.pairing_id);
 
-        let peer_a_sees = reg_a.take_pending_persist(&begin_a.pairing_id).unwrap();
-        assert_eq!(peer_a_sees.display_name, "machine-b");
-        assert!(reg_a.take_pending_persist(&begin_a.pairing_id).is_none());
-        let peer_b_sees = reg_b.take_pending_persist(&begin_b.pairing_id).unwrap();
-        assert_eq!(peer_b_sees.display_name, "machine-a");
+        assert_eq!(a_saved.len(), 1, "an outcome is saved exactly once");
+        assert_eq!(a_saved[0].display_name, "machine-b");
+        assert_eq!(b_saved.len(), 1);
+        assert_eq!(b_saved[0].display_name, "machine-a");
     }
 
     #[test]
@@ -321,8 +365,23 @@ mod tests {
 
         wait(&reg_a, &begin_a.pairing_id, PairPhase::Failed);
         wait(&reg_b, &begin_b.pairing_id, PairPhase::Failed);
-        assert!(reg_a.take_pending_persist(&begin_a.pairing_id).is_none());
-        assert!(reg_b.take_pending_persist(&begin_b.pairing_id).is_none());
+        assert!(!reg_a.persist_pending(&mut |_| panic!("a refused pairing must never be saved")));
+        assert!(!reg_b.persist_pending(&mut |_| panic!("a refused pairing must never be saved")));
     }
 
+
+    #[test]
+    fn cancelling_a_listening_session_releases_its_port() {
+        let reg = PairingRegistry::new(Identity::generate());
+        let begin = reg.begin(PairMode::Listen { display_name: "machine-a".into() }).unwrap();
+        let port: u16 = begin.listen_addr.unwrap().rsplit(':').next().unwrap().parse().unwrap();
+        reg.cancel(&begin.pairing_id);
+        for _ in 0..50 {
+            if TcpListener::bind(("0.0.0.0", port)).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("the pairing listener still holds its port after being cancelled");
+    }
 }

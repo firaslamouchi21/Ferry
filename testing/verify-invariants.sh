@@ -281,16 +281,22 @@ if [ "$MDNS_OK" = 1 ]; then
 
   echo
   echo "== kill mid-transfer: receiver is SIGKILLed mid-stream, transfer resumes on restart =="
-  stop_peer b
-  FERRY_TEST_CHUNK_DELAY_MS=150 start_peer b "$PORT_B"
-  for _ in $(seq 1 40); do peer b "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+  stop_peer a
+  FERRY_TEST_CHUNK_DELAY_MS=150 start_peer a "$PORT_A"
+  for _ in $(seq 1 40); do peer a "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+  wait_presence a peer-b online 45 >/dev/null || true
   head -c 3000000 /dev/urandom > "$ROOT/big.bin"
   BIGWANT=$(sha256sum "$ROOT/big.bin" | awk '{print $1}')
   peer a "$CLI" send "$BID" "$ROOT/big.bin" --ttl 3600 >/dev/null 2>&1 || bad "big send failed to queue"
-  sleep 3
+  partial=0
+  for _ in $(seq 1 100); do
+    partial=$(find "$ROOT/b/xdg" -name '*.bin' -size +300k -size -2800k -printf '%s\n' 2>/dev/null | sort -rn | head -1)
+    [ -n "$partial" ] && break
+    sleep 0.1
+  done
   stop_peer b KILL
-  partial=$(find "$ROOT/b/xdg" -name '*.bin' -printf '%s\n' 2>/dev/null | sort -rn | head -1)
-  echo "     receiver held ~${partial:-0} bytes when it was killed"
+  echo "     receiver held ~${partial:-0} of 3000000 bytes when it was killed"
+  [ -n "$partial" ] && ok "the receiver really was killed mid-stream" || bad "the receiver was not mid-stream when killed"
   start_peer b "$PORT_B"
   for _ in $(seq 1 40); do peer b "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
   if item=$(wait_delivered b big.bin); then

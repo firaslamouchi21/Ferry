@@ -5,6 +5,8 @@ use ferry_net::framing::{self, FramingError, IPC_MAX_FRAME_BYTES};
 use ferry_net::local_ipc::{self, Listener, Stream};
 
 const IPC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(200);
+const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 100;
 
 use ferry_core::expiry::ExpiryClock;
 use ferry_core::ipc::RuntimeStatus;
@@ -55,8 +57,21 @@ pub fn serve(
     source: &mut impl ferry_core::ports::OutboundSource,
     data_dir: &Path,
 ) -> Result<(), IpcServerError> {
+    let mut consecutive_failures = 0u32;
     loop {
-        let stream = local_ipc::accept(listener).map_err(IpcServerError::Accept)?;
+        let stream = match local_ipc::accept(listener) {
+            Ok(stream) => stream,
+            Err(err) => {
+                consecutive_failures += 1;
+                if consecutive_failures > MAX_CONSECUTIVE_ACCEPT_FAILURES {
+                    return Err(IpcServerError::Accept(err));
+                }
+                eprintln!("ferry-daemon: could not accept an IPC connection: {err}");
+                std::thread::sleep(ACCEPT_RETRY_DELAY);
+                continue;
+            }
+        };
+        consecutive_failures = 0;
         if handle_connection(stream, store, clock, source, runtime, event_bus, pairing, provider, data_dir) {
             return Ok(());
         }
@@ -96,6 +111,7 @@ fn handle_connection(
         IPC_MAX_FRAME_BYTES,
     ) {
         Ok(frame) => frame,
+        Err(FramingError::Io(err)) if is_probe_disconnect(&err) => return false,
         Err(err) => {
             eprintln!("ferry-daemon: dropping IPC connection — failed to read frame: {err}");
             return false;
@@ -161,10 +177,34 @@ fn handle_connection(
     quit
 }
 
+fn is_probe_disconnect(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+    )
+}
+
 fn write_response(stream: &mut Stream, response: &IpcResponse) {
     match serde_json::to_vec(response) {
         Ok(bytes) => {
-            if let Err(err) = ipc_write_frame(stream, &bytes) {
+            let written = match ipc_write_frame(stream, &bytes) {
+                Err(FramingError::OversizeFrame(size, limit)) => {
+                    let refusal = IpcResponse {
+                        request_id: response.request_id.clone(),
+                        outcome: IpcOutcome::Err {
+                            error: FerryError {
+                                code: ErrorCode::FrameTooLarge,
+                                message: format!("the response is {size} bytes, over the {limit} byte limit"),
+                            },
+                        },
+                    };
+                    serde_json::to_vec(&refusal)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| ipc_write_frame(stream, &bytes).map_err(|e| e.to_string()))
+                }
+                other => other.map_err(|e| e.to_string()),
+            };
+            if let Err(err) = written {
                 eprintln!("ferry-daemon: failed to write IPC response: {err}");
             }
         }
@@ -379,10 +419,7 @@ fn handle_pairing(
             Err(e) => pairing_err(request_id, e),
         },
         IpcRequest::PairStatus { pairing_id } => {
-            if let Some(peer) = pairing.take_pending_persist(&pairing_id) {
-                if let Err(e) = store.add_paired_peer(&peer) {
-                    return pairing_err(request_id, format!("pairing succeeded but the peer could not be saved: {e}"));
-                }
+            if pairing.persist_pending(&mut |peer| store.add_paired_peer(peer).map_err(|e| e.to_string())) {
                 event_bus.emit(IpcEvent::Changed {
                     resource: IpcResource::Roster,
                     id: None,

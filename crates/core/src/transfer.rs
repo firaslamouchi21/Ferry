@@ -6,7 +6,7 @@ use ferry_proto::envelope::{
     PROTOCOL_VERSION,
 };
 use ferry_proto::ids::ItemId;
-use ferry_proto::states::TransferState;
+use ferry_proto::states::{ItemKind, TransferState};
 use thiserror::Error;
 
 use crate::expiry::ExpiryClock;
@@ -55,7 +55,15 @@ pub enum TransferError {
     DeclinedByReceiver(String),
     #[error("item {0} is awaiting a local accept/reject decision")]
     AwaitingDecision(String),
+    #[error("item {0} was cancelled locally")]
+    Cancelled(String),
+    #[error("item {0} does not belong to the peer that referenced it")]
+    ForeignItem(String),
+    #[error("an offer for item {0} does not match the one already on record")]
+    OfferMismatch(String),
 }
+
+const CANCEL_CHECK_EVERY_CHUNKS: usize = 16;
 
 pub fn send_message(channel: &mut impl Channel, message: WireMessage) -> Result<(), TransferError> {
     let envelope = Envelope {
@@ -214,8 +222,13 @@ pub fn send_item_reporting(
     let starting_state = store
         .get_outbound_state(item_id)?
         .ok_or_else(|| TransferError::UnknownItem(item_id.to_string()))?;
-    if starting_state == TransferState::Queued {
-        transition_outbound(store, item_id, TransferState::Offered)?;
+    match starting_state {
+        TransferState::Queued => transition_outbound(store, item_id, TransferState::Offered)?,
+        TransferState::Delivered | TransferState::Opened => return Ok(()),
+        TransferState::Failed | TransferState::Expired => {
+            return Err(TransferError::Cancelled(item_id.to_string()))
+        }
+        _ => {}
     }
 
     send_offer(channel, item_id, item)?;
@@ -237,11 +250,14 @@ pub fn send_item_reporting(
     let state_before_chunks = store
         .get_outbound_state(item_id)?
         .ok_or_else(|| TransferError::UnknownItem(item_id.to_string()))?;
-    if state_before_chunks == TransferState::Offered {
-        transition_outbound(store, item_id, TransferState::Accepted)?;
-        transition_outbound(store, item_id, TransferState::Transferring)?;
-    } else if state_before_chunks != TransferState::Transferring {
-        TRANSFER_TRANSITIONS.validate(state_before_chunks, TransferState::Transferring)?;
+    match state_before_chunks {
+        TransferState::Offered => {
+            transition_outbound(store, item_id, TransferState::Accepted)?;
+            transition_outbound(store, item_id, TransferState::Transferring)?;
+        }
+        TransferState::Transferring => {}
+        TransferState::Failed => return Err(TransferError::Cancelled(item_id.to_string())),
+        _ => transition_outbound(store, item_id, TransferState::Transferring)?,
     }
 
     let resume_seq = resume_seq_from_offset(accept.offset, DEFAULT_CHUNK_BYTES);
@@ -249,7 +265,10 @@ pub fn send_item_reporting(
 
     let chunk_delay = test_chunk_delay();
     let mut sent = accept.offset;
-    for chunk in Chunker::new(source, DEFAULT_CHUNK_BYTES, resume_seq) {
+    for (index, chunk) in Chunker::new(source, DEFAULT_CHUNK_BYTES, resume_seq).enumerate() {
+        if index % CANCEL_CHECK_EVERY_CHUNKS == 0 {
+            ensure_not_cancelled(store, item_id)?;
+        }
         let (seq, bytes) = chunk?;
         let n = bytes.len() as u64;
         send_chunk(channel, item_id, seq, bytes)?;
@@ -263,21 +282,20 @@ pub fn send_item_reporting(
 
     match recv_message(channel)? {
         WireMessage::Delivered(delivered) if delivered.item_id.0 == item_id => {
+            ensure_not_cancelled(store, item_id)?;
             transition_outbound(store, item_id, TransferState::Delivered)?;
         }
         other => return Err(TransferError::UnexpectedMessage(format!("{other:?}"))),
     }
 
-    if item.notify_on_open {
-        match recv_message(channel)? {
-            WireMessage::Opened(opened) if opened.item_id.0 == item_id => {
-                transition_outbound(store, item_id, TransferState::Opened)?;
-            }
-            other => return Err(TransferError::UnexpectedMessage(format!("{other:?}"))),
-        }
-    }
-
     Ok(())
+}
+
+fn ensure_not_cancelled(store: &impl Store, item_id: &str) -> Result<(), TransferError> {
+    match store.get_outbound_state(item_id)? {
+        Some(TransferState::Failed) => Err(TransferError::Cancelled(item_id.to_string())),
+        _ => Ok(()),
+    }
 }
 
 pub fn receive_item(
@@ -323,11 +341,17 @@ pub fn receive_next_inbound(
         }
         WireMessage::Opened(opened) => {
             let item_id = opened.item_id.0;
+            if let Some(recipient) = store.outbound_recipient(&item_id)? {
+                if recipient != peer_id {
+                    return Err(TransferError::ForeignItem(item_id));
+                }
+            }
             match store.get_outbound_state(&item_id)? {
                 Some(TransferState::Opened) => {}
                 Some(_) => transition_outbound(store, &item_id, TransferState::Opened)?,
                 None => return Err(TransferError::UnknownItem(item_id)),
             }
+            let _ = send_delivered(channel, &item_id);
             Ok(InboundEvent::OpenReceipt(item_id))
         }
         other => Err(TransferError::UnexpectedMessage(format!("{other:?}"))),
@@ -370,10 +394,24 @@ fn receive_offered_item(
 
     store.create_inbound(&offer, peer_id, actor)?;
 
+    if let Some(origin) = store.inbound_origin(&item_id)? {
+        if origin.peer_id != peer_id {
+            return Err(TransferError::ForeignItem(item_id));
+        }
+        if origin.hash != offer.hash || origin.size_bytes != offer.size_bytes || origin.kind != offer.kind {
+            return Err(TransferError::OfferMismatch(item_id));
+        }
+    }
+
     let current = store
         .get_inbound_state(&item_id)?
         .ok_or_else(|| TransferError::UnknownItem(item_id.clone()))?;
     match current {
+        TransferState::Delivered | TransferState::Opened | TransferState::Expired
+            if store.inbound_bytes_received(&item_id)? == offer.size_bytes =>
+        {
+            return acknowledge_redelivery(channel, offer);
+        }
         TransferState::Offered => {
             if !auto_accept {
                 return Ok(OfferedOutcome::Pending(offer));
@@ -384,7 +422,11 @@ fn receive_offered_item(
         TransferState::Accepted => {
             transition_inbound(store, &item_id, TransferState::Transferring)?;
         }
-        TransferState::Transferring => {}
+        TransferState::Transferring => {
+            if offer.kind == ItemKind::Secret {
+                store.reset_inbound_payload(&item_id)?;
+            }
+        }
         TransferState::Failed => {
             send_reject(channel, &item_id)?;
             return Ok(OfferedOutcome::Declined(item_id));
@@ -404,6 +446,7 @@ fn receive_offered_item(
                 let incoming = chunk.bytes.len() as u64;
                 if already_received.saturating_add(incoming) > offer.size_bytes {
                     store.set_inbound_state(&item_id, TransferState::Failed)?;
+                    store.reset_inbound_payload(&item_id)?;
                     return Err(TransferError::DeclaredSizeExceeded {
                         item_id: item_id.clone(),
                         declared: offer.size_bytes,
@@ -415,10 +458,11 @@ fn receive_offered_item(
             }
             WireMessage::Done(done) if done.item_id.0 == item_id => {
                 let computed = store.inbound_full_hash_so_far(&item_id)?;
-                if computed != done.hash {
+                if computed != done.hash || computed != offer.hash {
                     store.set_inbound_state(&item_id, TransferState::Failed)?;
+                    store.reset_inbound_payload(&item_id)?;
                     return Err(TransferError::HashMismatch {
-                        expected: done.hash,
+                        expected: offer.hash,
                         computed,
                     });
                 }
@@ -432,10 +476,22 @@ fn receive_offered_item(
         .get_inbound_state(&item_id)?
         .ok_or_else(|| TransferError::UnknownItem(item_id.clone()))?;
     TRANSFER_TRANSITIONS.validate(current, TransferState::Delivered)?;
-    store.finalize_inbound_delivered(&item_id)?;
     store.set_inbound_expiry(&item_id, &clock.compute_deadline(offer.ttl_secs))?;
-    send_delivered(channel, &item_id)?;
+    store.finalize_inbound_delivered(&item_id)?;
+    let _ = send_delivered(channel, &item_id);
     Ok(OfferedOutcome::Delivered(offer))
+}
+
+fn acknowledge_redelivery(channel: &mut impl Channel, offer: Offer) -> Result<OfferedOutcome, TransferError> {
+    let item_id = offer.item_id.0.clone();
+    send_accept(channel, &item_id, offer.size_bytes)?;
+    match recv_message(channel)? {
+        WireMessage::Done(done) if done.item_id.0 == item_id && done.hash == offer.hash => {
+            send_delivered(channel, &item_id)?;
+            Ok(OfferedOutcome::Delivered(offer))
+        }
+        other => Err(TransferError::UnexpectedMessage(format!("{other:?}"))),
+    }
 }
 
 pub fn expire_if_due(
@@ -460,7 +516,23 @@ pub fn expire_if_due(
         return Ok(false);
     }
 
+    store.purge_inbound_payload(item_id)?;
     store.set_inbound_state(item_id, TransferState::Expired)?;
+    Ok(true)
+}
+
+pub fn purge_if_past_deadline(
+    store: &mut impl Store,
+    clock: &ExpiryClock,
+    item_id: &str,
+) -> Result<bool, TransferError> {
+    let Some(deadline) = store.get_inbound_expiry(item_id)? else {
+        return Ok(false);
+    };
+    if !clock.is_expired(&deadline) {
+        return Ok(false);
+    }
+    store.purge_inbound_payload(item_id)?;
     Ok(true)
 }
 
@@ -476,10 +548,20 @@ pub fn check_openable(
         .get_inbound_state(item_id)?
         .ok_or_else(|| TransferError::UnknownItem(item_id.to_string()))?;
     if current == TransferState::Opened {
-        return Err(TransferError::AlreadyOpened(item_id.to_string()));
+        return match store.is_inbound_reopenable(item_id)? {
+            true => reject_if_past_deadline(store, clock, item_id),
+            false => Err(TransferError::AlreadyOpened(item_id.to_string())),
+        };
     }
     TRANSFER_TRANSITIONS.validate(current, TransferState::Opened)?;
     Ok(())
+}
+
+fn reject_if_past_deadline(store: &impl Store, clock: &ExpiryClock, item_id: &str) -> Result<(), TransferError> {
+    match store.get_inbound_expiry(item_id)? {
+        Some(deadline) if clock.is_expired(&deadline) => Err(TransferError::Expired(item_id.to_string())),
+        _ => Ok(()),
+    }
 }
 
 pub fn open_item_locally(
@@ -488,6 +570,9 @@ pub fn open_item_locally(
     item_id: &str,
 ) -> Result<(), TransferError> {
     check_openable(store, clock, item_id)?;
+    if store.get_inbound_state(item_id)? == Some(TransferState::Opened) {
+        return Ok(());
+    }
     Ok(store.mark_inbound_opened(item_id)?)
 }
 
@@ -512,7 +597,6 @@ pub fn open_item(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ferry_proto::states::ItemKind;
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use std::io::Cursor;
@@ -561,11 +645,13 @@ mod tests {
         state: TransferState,
         bytes: Vec<u8>,
         is_burn_after_read: bool,
+        origin: crate::ports::InboundOrigin,
     }
 
     #[derive(Default)]
     struct FakeStore {
         outbound: HashMap<String, TransferState>,
+        outbound_recipients: HashMap<String, String>,
         inbound: HashMap<String, FakeInboundItem>,
         inbound_expiry: HashMap<String, crate::expiry::ExpiryDeadline>,
     }
@@ -607,14 +693,39 @@ mod tests {
         fn create_inbound(
             &mut self,
             offer: &Offer,
-            _peer_id: &str,
+            peer_id: &str,
             _actor: &str,
         ) -> Result<(), StoreError> {
             self.inbound.entry(offer.item_id.0.clone()).or_insert(FakeInboundItem {
                 state: TransferState::Offered,
                 bytes: Vec::new(),
                 is_burn_after_read: offer.burn_after_read,
+                origin: crate::ports::InboundOrigin {
+                    peer_id: peer_id.to_string(),
+                    hash: offer.hash.clone(),
+                    size_bytes: offer.size_bytes,
+                    kind: offer.kind,
+                },
             });
+            Ok(())
+        }
+
+        fn inbound_origin(&self, item_id: &str) -> Result<Option<crate::ports::InboundOrigin>, StoreError> {
+            Ok(self.inbound.get(item_id).map(|i| i.origin.clone()))
+        }
+
+        fn outbound_recipient(&self, item_id: &str) -> Result<Option<String>, StoreError> {
+            Ok(self.outbound_recipients.get(item_id).cloned())
+        }
+
+        fn is_inbound_reopenable(&self, item_id: &str) -> Result<bool, StoreError> {
+            Ok(self.inbound.get(item_id).map(|i| !i.is_burn_after_read).unwrap_or(false))
+        }
+
+        fn reset_inbound_payload(&mut self, item_id: &str) -> Result<(), StoreError> {
+            if let Some(item) = self.inbound.get_mut(item_id) {
+                item.bytes.clear();
+            }
             Ok(())
         }
 
@@ -1263,5 +1374,156 @@ mod tests {
         assert!(seen.iter().all(|(id, _, tot)| id == "item-1" && *tot == total));
         assert_eq!(seen.last().unwrap().1, total, "the final progress report must equal the full size");
         assert!(seen[0].1 < total && seen[0].1 > 0);
+    }
+
+    fn hash_of(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    fn item_with(payload: &[u8]) -> NewOutboundItem {
+        NewOutboundItem {
+            hash: hash_of(payload),
+            size_bytes: payload.len() as u64,
+            ..sample_item()
+        }
+    }
+
+    fn deliver(
+        receiver_store: &mut FakeStore,
+        sender_state: TransferState,
+        item: &NewOutboundItem,
+        payload: &[u8],
+    ) -> (Result<(), TransferError>, FakeStore, Result<Offer, TransferError>) {
+        let (mut sender_channel, mut receiver_channel) = paired_channels("peer-a", "peer-b");
+        let (item, payload) = (item.clone(), payload.to_vec());
+        let sender = std::thread::spawn(move || {
+            let mut store = FakeStore::with_outbound("item-1", sender_state);
+            let result = send_item(&mut sender_channel, &mut store, "item-1", &item, Cursor::new(payload));
+            (result, store)
+        });
+        let received = receive_item(&mut receiver_channel, receiver_store, &ExpiryClock::new(), "peer-a", "local");
+        drop(receiver_channel);
+        let (sent, store) = sender.join().unwrap();
+        (sent, store, received)
+    }
+
+    #[test]
+    fn a_sender_that_never_heard_the_delivered_ack_is_told_again_instead_of_failing_forever() {
+        for already in [TransferState::Delivered, TransferState::Opened, TransferState::Expired] {
+            let payload = b"delivered once".to_vec();
+            let item = item_with(&payload);
+            let mut receiver_store = FakeStore::default();
+            let (first, _, _) = deliver(&mut receiver_store, TransferState::Queued, &item, &payload);
+            first.unwrap();
+            receiver_store.set_inbound_state("item-1", already).unwrap();
+
+            let (again, sender_store, _) = deliver(&mut receiver_store, TransferState::Transferring, &item, &payload);
+            again.unwrap();
+            assert_eq!(sender_store.outbound["item-1"], TransferState::Delivered);
+            assert_eq!(receiver_store.inbound["item-1"].state, already, "a redelivery must not disturb the receiver");
+            assert_eq!(receiver_store.inbound["item-1"].bytes, payload);
+        }
+    }
+
+    #[test]
+    fn a_notify_on_open_item_is_delivered_without_waiting_for_the_recipient_to_open_it() {
+        let payload = b"tell me when you read this".to_vec();
+        let item = NewOutboundItem { notify_on_open: true, ..item_with(&payload) };
+        let (sent, sender_store, _) = deliver(&mut FakeStore::default(), TransferState::Queued, &item, &payload);
+        sent.unwrap();
+        assert_eq!(sender_store.outbound["item-1"], TransferState::Delivered);
+    }
+
+    #[test]
+    fn an_item_that_crashed_in_accepted_still_reaches_delivered() {
+        let payload = b"resumed".to_vec();
+        let (sent, sender_store, _) = deliver(&mut FakeStore::default(), TransferState::Accepted, &item_with(&payload), &payload);
+        sent.unwrap();
+        assert_eq!(sender_store.outbound["item-1"], TransferState::Delivered);
+    }
+
+    #[test]
+    fn a_peer_cannot_touch_an_item_that_another_peer_owns() {
+        let payload = b"from peer-a".to_vec();
+        let mut receiver_store = FakeStore::default();
+        let (mut channel, mut peer) = paired_channels("peer-b", "peer-c");
+        receiver_store
+            .create_inbound(
+                &Offer {
+                    item_id: ItemId("item-1".into()),
+                    kind: ItemKind::File,
+                    name: "a.txt".into(),
+                    size_bytes: payload.len() as u64,
+                    hash: hash_of(&payload),
+                    ttl_secs: 60,
+                    burn_after_read: false,
+                    notify_on_open: false,
+                },
+                "peer-a",
+                "local",
+            )
+            .unwrap();
+        send_offer(&mut peer, "item-1", &item_with(&payload)).unwrap();
+        let result = receive_item(&mut channel, &mut receiver_store, &ExpiryClock::new(), "peer-c", "local");
+        assert!(matches!(result, Err(TransferError::ForeignItem(_))), "got {result:?}");
+        assert_eq!(receiver_store.inbound["item-1"].state, TransferState::Offered);
+
+        let mut sender_store = FakeStore::with_outbound("item-9", TransferState::Delivered);
+        sender_store.outbound_recipients.insert("item-9".into(), "peer-a".into());
+        send_opened(&mut peer, "item-9").unwrap();
+        let receipt = receive_next_inbound(&mut channel, &mut sender_store, &ExpiryClock::new(), "peer-c", "local", true, &mut |_, _, _| {});
+        assert!(matches!(receipt, Err(TransferError::ForeignItem(_))), "got {receipt:?}");
+        assert_eq!(sender_store.outbound["item-9"], TransferState::Delivered, "a forged receipt must not mark it opened");
+    }
+
+    #[test]
+    fn an_offer_reusing_an_id_for_different_content_is_refused() {
+        let payload = b"original".to_vec();
+        let mut receiver_store = FakeStore::default();
+        deliver(&mut receiver_store, TransferState::Queued, &item_with(&payload), &payload).0.unwrap();
+        let (_, _, received) = deliver(&mut receiver_store, TransferState::Queued, &item_with(b"replaced"), b"replaced");
+        assert!(matches!(received, Err(TransferError::OfferMismatch(_))), "got {received:?}");
+        assert_eq!(receiver_store.inbound["item-1"].bytes, payload);
+    }
+
+    #[test]
+    fn a_half_received_secret_restarts_from_zero_instead_of_mixing_two_attempts() {
+        let payload = b"API_KEY=abc".to_vec();
+        let item = NewOutboundItem { kind: ItemKind::Secret, ..item_with(&payload) };
+        let mut receiver_store = FakeStore::default();
+        let (mut channel, mut peer) = paired_channels("peer-b", "peer-a");
+        send_offer(&mut peer, "item-1", &item).unwrap();
+        send_chunk(&mut peer, "item-1", 0, b"API_".to_vec()).unwrap();
+        drop(peer);
+        assert!(receive_item(&mut channel, &mut receiver_store, &ExpiryClock::new(), "peer-a", "local").is_err());
+
+        deliver(&mut receiver_store, TransferState::Transferring, &item, &payload).0.unwrap();
+        assert_eq!(receiver_store.inbound["item-1"].bytes, payload);
+    }
+
+    #[test]
+    fn an_ordinary_file_can_be_opened_again_but_not_after_its_ttl() {
+        let payload = b"keep me".to_vec();
+        let mut store = FakeStore::default();
+        deliver(&mut store, TransferState::Queued, &item_with(&payload), &payload).0.unwrap();
+        let clock = ExpiryClock::new();
+        store.set_inbound_expiry("item-1", &clock.compute_deadline(600)).unwrap();
+
+        open_item_locally(&mut store, &clock, "item-1").unwrap();
+        check_openable(&mut store, &clock, "item-1").expect("a non-burn file must stay openable");
+        open_item_locally(&mut store, &clock, "item-1").unwrap();
+
+        store.set_inbound_expiry("item-1", &clock.compute_deadline(0)).unwrap();
+        assert!(matches!(check_openable(&mut store, &clock, "item-1"), Err(TransferError::Expired(_))));
+    }
+
+    #[test]
+    fn a_locally_aborted_item_stops_streaming() {
+        let payload = b"never mind".to_vec();
+        let (mut channel, _peer) = paired_channels("peer-a", "peer-b");
+        let mut store = FakeStore::with_outbound("item-1", TransferState::Failed);
+        let result = send_item(&mut channel, &mut store, "item-1", &item_with(&payload), Cursor::new(payload));
+        assert!(matches!(result, Err(TransferError::Cancelled(_))));
+        assert_eq!(store.outbound["item-1"], TransferState::Failed);
     }
 }

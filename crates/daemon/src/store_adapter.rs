@@ -318,6 +318,10 @@ impl Store for SqliteStore {
         ferry_store::outbox::record_attempt(&self.conn, outbox_id).map_err(|e| StoreError(e.to_string()))
     }
 
+    fn reset_outbox_backoff(&mut self, outbox_id: &str) -> Result<(), StoreError> {
+        ferry_store::outbox::reset_backoff(&self.conn, outbox_id).map_err(|e| StoreError(e.to_string()))
+    }
+
     fn remove_outbox_entry(&mut self, outbox_id: &str) -> Result<(), StoreError> {
         ferry_store::outbox::remove(&self.conn, outbox_id).map_err(|e| StoreError(e.to_string()))
     }
@@ -437,7 +441,16 @@ impl Store for SqliteStore {
             }
             Ok(plaintext)
         } else {
-            ferry_store::payload::read_all(&self.payload_dir, item_id).map_err(|e| StoreError(e.to_string()))
+            let bytes = ferry_store::payload::read_all(&self.payload_dir, item_id)
+                .map_err(|e| StoreError(e.to_string()))?;
+            if bytes.len() as i64 != item.size_bytes {
+                return Err(StoreError(format!(
+                    "the stored payload is incomplete: {} of {} bytes present",
+                    bytes.len(),
+                    item.size_bytes
+                )));
+            }
+            Ok(bytes)
         }
     }
 
@@ -687,19 +700,11 @@ impl Store for SqliteStore {
     }
 
     fn retry_outbound(&mut self, item_id: &str, _actor: &str) -> Result<(), StoreError> {
-        let item = ferry_store::outbound::get(&self.conn, item_id)
+        ferry_store::outbound::get(&self.conn, item_id)
             .map_err(|e| StoreError(e.to_string()))?
             .ok_or_else(|| StoreError(format!("no outbound item {item_id}")))?;
-        if ferry_store::outbox::get_for_item(&self.conn, item_id)
-            .map_err(|e| StoreError(e.to_string()))?
-            .is_none()
-        {
-            ferry_store::outbox::enqueue(&self.conn, item_id, &item.peer_id, None)
-                .map_err(|e| StoreError(e.to_string()))?;
-        }
-        ferry_store::outbound::set_state(&self.conn, item_id, TransferState::Queued)
+        ferry_store::outbound::set_last_error(&self.conn, item_id, "sent again as a new transfer")
             .map_err(|e| StoreError(e.to_string()))?;
-        let _ = ferry_store::outbound::set_last_error(&self.conn, item_id, "");
         let _ = ferry_store::audit::append(&self.conn, "local", "outbox.retry", Some(item_id), "ok");
         Ok(())
     }
@@ -917,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn abort_outbound_drops_the_outbox_entry_and_retry_requeues_it() {
+    fn abort_outbound_drops_the_outbox_entry_and_retry_never_revives_a_terminal_item() {
         let mut store = store_with_peer("peer-b", "bob");
         let clock = ferry_core::expiry::ExpiryClock::new();
         let id = enqueue_send(&mut store, &clock, &sample_item("peer-b"), "local").unwrap();
@@ -927,8 +932,35 @@ mod tests {
         assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Failed));
 
         store.retry_outbound(&id, "local").unwrap();
-        assert_eq!(ferry_store::outbox::list_for_peer(&store.conn, "peer-b").unwrap().len(), 1);
-        assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Queued));
+        assert!(ferry_store::outbox::list_for_peer(&store.conn, "peer-b").unwrap().is_empty());
+        assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Failed));
+    }
+
+    #[test]
+    fn a_peer_with_transfer_history_can_be_removed_and_paired_again() {
+        let mut store = store_with_peer("peer-b", "bob");
+        let clock = ferry_core::expiry::ExpiryClock::new();
+        let id = enqueue_send(&mut store, &clock, &sample_item("peer-b"), "local").unwrap();
+
+        store.remove_peer("peer-b").unwrap();
+        assert!(store.list_roster_peers().unwrap().is_empty());
+        assert!(!store.is_peer_authorized("peer-b").unwrap());
+        assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Failed));
+        assert!(ferry_store::outbox::list_for_peer(&store.conn, "peer-b").unwrap().is_empty());
+        assert_eq!(store.list_sent_items().unwrap()[0].peer_display_name, "bob");
+
+        let again = ferry_core::ports::NewRosterPeer {
+            peer_id: "peer-b".into(),
+            display_name: "bob-laptop".into(),
+            signing_key_hex: "sk".into(),
+            sealing_key: "xk".into(),
+        };
+        store.add_paired_peer(&again).unwrap();
+        store.add_paired_peer(&again).expect("re-pairing with identical keys must be idempotent");
+        assert_eq!(store.list_roster_peers().unwrap()[0].display_name, "bob-laptop");
+
+        let impostor = ferry_core::ports::NewRosterPeer { sealing_key: "other".into(), ..again };
+        assert!(store.add_paired_peer(&impostor).is_err(), "a known peer id must never silently change keys");
     }
 
     #[test]
@@ -1107,6 +1139,16 @@ mod tests {
         let sender_thread = std::thread::spawn(move || {
             send_item(&mut sender_channel, &mut sender_store, &sender_item_id, &item, Cursor::new(sender_payload))
                 .unwrap();
+            ferry_core::transfer::receive_next_inbound(
+                &mut sender_channel,
+                &mut sender_store,
+                &ferry_core::expiry::ExpiryClock::new(),
+                "peer-b",
+                "local",
+                true,
+                &mut |_, _, _| {},
+            )
+            .unwrap();
             (sender_channel, sender_store)
         });
 
@@ -1262,7 +1304,7 @@ mod tests {
                 peer_id: "peer-b".into(),
                 kind: ItemKind::File,
                 name: "restart-test.bin".into(),
-                size_bytes: 24,
+                size_bytes: 23,
                 hash: expected_hash.clone(),
                 ttl_secs: 600,
                 is_burn_after_read: false,
@@ -1404,7 +1446,7 @@ mod tests {
         let sender_thread = std::thread::spawn(move || {
             send_item(&mut sender_channel, &mut sender_store, &sender_item_id, &item, Cursor::new(sender_payload))
                 .unwrap();
-            sender_store
+            (sender_channel, sender_store)
         });
 
         receive_item(&mut receiver_channel, &mut receiver_store, &clock, "peer-a", "local").unwrap();
@@ -1425,8 +1467,8 @@ mod tests {
         let decrypted = receiver_store.read_inbound_plaintext(&item_id).unwrap();
         assert_eq!(decrypted, payload, "sealed local storage must be readable fully offline before burn");
 
+        let _sender = sender_thread.join().unwrap();
         open_item(&mut receiver_channel, &mut receiver_store, &clock, &item_id).unwrap();
-        sender_thread.join().unwrap();
 
         let inbound_after_burn = ferry_store::inbox::get(&receiver_store.conn, &item_id).unwrap().unwrap();
         assert!(

@@ -7,6 +7,10 @@ use ferry_proto::ipc::{
 };
 use ferry_proto::states::{ItemKind, TransferState};
 
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use base64::Engine;
 
 use crate::expiry::ExpiryClock;
@@ -14,7 +18,7 @@ use crate::outbox::{enqueue_send_from_path, OutboxError, SendRequest};
 use crate::policy::PolicyError;
 use crate::ports::{NewRosterPeer, OutboundSource, Store};
 use crate::transfer::{
-    accept_inbound_offer, check_openable, open_item_locally, reject_inbound_offer, TransferError,
+    accept_inbound_offer, check_openable, expire_if_due, open_item_locally, purge_if_past_deadline, reject_inbound_offer, TransferError,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -33,7 +37,17 @@ pub struct RuntimeStatus {
     pub transport_ok: bool,
     pub discovery_ok: bool,
     pub identity: RuntimeIdentity,
+    pub daemon_version: String,
+    pub live: Option<Arc<LiveHealth>>,
 }
+
+#[derive(Debug, Default)]
+pub struct LiveHealth {
+    pub transport_ok: AtomicBool,
+    pub discovery_ok: AtomicBool,
+}
+
+pub const MAX_INLINE_OPEN_BYTES: u64 = 40 * 1024 * 1024;
 
 pub fn handle(
     store: &mut impl Store,
@@ -118,7 +132,7 @@ pub fn handle(
             is_burn_after_read,
             notify_on_open,
         ),
-        IpcRequest::InboxList => inbox_list_outcome(store),
+        IpcRequest::InboxList => inbox_list_outcome(store, clock),
         IpcRequest::InboxAccept { item_id } => match accept_inbound_offer(store, &item_id) {
             Ok(()) => IpcOutcome::Ok { value: IpcResult::Ack },
             Err(err) => transfer_error_outcome(&item_id, err),
@@ -137,10 +151,7 @@ pub fn handle(
             Ok(()) => IpcOutcome::Ok { value: IpcResult::Ack },
             Err(err) => internal_error(err.to_string()),
         },
-        IpcRequest::SentRetry { item_id } => match store.retry_outbound(&item_id, "local") {
-            Ok(()) => IpcOutcome::Ok { value: IpcResult::Ack },
-            Err(err) => internal_error(err.to_string()),
-        },
+        IpcRequest::SentRetry { item_id } => sent_retry_outcome(store, clock, source, &item_id),
         IpcRequest::AuditList { limit, before_millis } => audit_list_outcome(store, limit, before_millis),
         IpcRequest::PeerRemove { peer_id } => match store.remove_peer(&peer_id) {
             Ok(()) => IpcOutcome::Ok { value: IpcResult::Ack },
@@ -181,9 +192,18 @@ fn status_outcome(store: &impl Store, runtime: &RuntimeStatus) -> IpcOutcome {
         value: IpcResult::Status(DaemonStatus {
             protocol_version: PROTOCOL_VERSION,
             ipc_protocol_version: IPC_PROTOCOL_VERSION,
-            discovery_ok: runtime.discovery_ok,
-            transport_ok: runtime.transport_ok,
+            discovery_ok: runtime
+                .live
+                .as_ref()
+                .map(|live| live.discovery_ok.load(Ordering::Relaxed))
+                .unwrap_or(runtime.discovery_ok),
+            transport_ok: runtime
+                .live
+                .as_ref()
+                .map(|live| live.transport_ok.load(Ordering::Relaxed))
+                .unwrap_or(runtime.transport_ok),
             store_ok,
+            daemon_version: runtime.daemon_version.clone(),
         }),
     }
 }
@@ -337,7 +357,28 @@ fn pair_complete_outcome(store: &mut impl Store, peer: &NewRosterPeer) -> IpcOut
     }
 }
 
-fn inbox_list_outcome(store: &impl Store) -> IpcOutcome {
+pub fn expire_due_inbox_items(store: &mut impl Store, clock: &ExpiryClock) -> Result<(), TransferError> {
+    for item in store.list_inbox_items()? {
+        if item.kind == ItemKind::Message || item.expires_at_millis.is_none() {
+            continue;
+        }
+        match item.state {
+            TransferState::Delivered => {
+                expire_if_due(store, clock, &item.item_id)?;
+            }
+            TransferState::Opened if !item.is_burn_after_read => {
+                purge_if_past_deadline(store, clock, &item.item_id)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn inbox_list_outcome(store: &mut impl Store, clock: &ExpiryClock) -> IpcOutcome {
+    if let Err(err) = expire_due_inbox_items(store, clock) {
+        return internal_error(err.to_string());
+    }
     match store.list_inbox_items() {
         Ok(items) => IpcOutcome::Ok {
             value: IpcResult::InboxList(
@@ -712,9 +753,15 @@ mod tests {
         }
         fn get_outbound_state(
             &self,
-            _item_id: &str,
+            item_id: &str,
         ) -> Result<Option<ferry_proto::states::TransferState>, crate::ports::StoreError> {
-            unimplemented!("not needed for ipc tests")
+            Ok(self.outbound.get(item_id).map(|_| {
+                if self.aborted.iter().any(|id| id == item_id) {
+                    ferry_proto::states::TransferState::Failed
+                } else {
+                    ferry_proto::states::TransferState::Queued
+                }
+            }))
         }
         fn set_outbound_state(
             &mut self,
@@ -778,9 +825,9 @@ mod tests {
         }
         fn get_outbound_item(
             &self,
-            _item_id: &str,
+            item_id: &str,
         ) -> Result<Option<crate::ports::NewOutboundItem>, crate::ports::StoreError> {
-            unimplemented!("not needed for ipc tests")
+            Ok(self.outbound.get(item_id).cloned())
         }
         fn list_outbox_for_peer(
             &self,
@@ -1367,6 +1414,7 @@ mod tests {
                 data_dir: "/data".into(),
                 auto_accept_from_roster: true,
             },
+            ..Default::default()
         };
         let response = handle(&mut store, &clock, &mut source, &runtime, RequestId("r".into()), IPC_PROTOCOL_VERSION, IpcRequest::Identity);
         match response.outcome {
@@ -1600,17 +1648,43 @@ mod tests {
     #[test]
     fn sent_abort_and_retry_reach_the_store_only_for_known_items() {
         let mut store = healthy_store();
-        store.outbound.insert("item-1".into(), sample_outbound());
+        let original = sample_outbound();
+        store.authorized_peers.insert(original.peer_id.clone());
+        store.outbound.insert("orig-1".into(), original.clone());
+
+        let retry = |store: &mut FakeStore| {
+            let mut source = FakeSource {
+                contents: std::collections::HashMap::from([(original.source_path.clone(), b"current contents".to_vec())]),
+            };
+            handle(
+                store,
+                &ExpiryClock::new(),
+                &mut source,
+                &RuntimeStatus::default(),
+                RequestId("req-1".into()),
+                IPC_PROTOCOL_VERSION,
+                IpcRequest::SentRetry { item_id: "orig-1".into() },
+            )
+            .outcome
+        };
+
+        assert!(
+            matches!(retry(&mut store), IpcOutcome::Err { error } if error.code == ErrorCode::IllegalStateTransition),
+            "a queued item must not be retried into a duplicate"
+        );
         assert!(matches!(
-            handle_with_defaults(&mut store, IpcRequest::SentAbort { item_id: "item-1".into() }).outcome,
+            handle_with_defaults(&mut store, IpcRequest::SentAbort { item_id: "orig-1".into() }).outcome,
             IpcOutcome::Ok { .. }
         ));
-        assert!(matches!(
-            handle_with_defaults(&mut store, IpcRequest::SentRetry { item_id: "item-1".into() }).outcome,
-            IpcOutcome::Ok { .. }
-        ));
-        assert_eq!(store.aborted, vec!["item-1".to_string()]);
-        assert_eq!(store.retried, vec!["item-1".to_string()]);
+        assert!(matches!(retry(&mut store), IpcOutcome::Ok { .. }));
+        let (_, resent) = store
+            .outbound
+            .iter()
+            .find(|(id, _)| id.as_str() != "orig-1")
+            .expect("a retry must queue a fresh item rather than revive a terminal one");
+        assert_eq!(resent.size_bytes, b"current contents".len() as u64);
+        assert_eq!(store.aborted, vec!["orig-1".to_string()]);
+        assert_eq!(store.retried, vec!["orig-1".to_string()]);
 
         assert!(matches!(
             handle_with_defaults(&mut store, IpcRequest::SentAbort { item_id: "ghost".into() }).outcome,

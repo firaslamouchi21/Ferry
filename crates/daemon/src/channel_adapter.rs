@@ -176,6 +176,16 @@ mod tests {
         let sender_payload = payload.clone();
         let sender_item_id = item_id.clone();
         send_item(&mut channel, &mut sender_store, &sender_item_id, &item, Cursor::new(sender_payload)).unwrap();
+        ferry_core::transfer::receive_next_inbound(
+            &mut channel,
+            &mut sender_store,
+            &sender_clock,
+            "peer-b",
+            "local",
+            true,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
 
         let (offer, receiver_store) = responder_thread.join().unwrap();
         assert_eq!(offer.item_id.0, item_id);

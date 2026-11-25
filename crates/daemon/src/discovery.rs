@@ -1,23 +1,31 @@
-use std::collections::HashMap;
-use std::net::TcpStream;
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::net::{SocketAddr, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ferry_core::dispatcher::drain_outbox_for_peer_reporting;
 use ferry_core::expiry::ExpiryClock;
 use ferry_core::ports::{OutboundSource, Store};
 use ferry_net::discovery::{peer_from_resolved, Discovery, DiscoveredPeer};
-use ferry_net::transport::{connect_initiator, StaticKeypair};
+use ferry_net::transport::{connect_initiator, AuthenticatedChannel, StaticKeypair};
 use ferry_proto::ipc::{IpcEvent, IpcResource};
 use mdns_sd::{RecvTimeoutError, ServiceEvent};
 
 use crate::channel_adapter::NetChannel;
 use crate::event_bus::EventSink;
+use crate::file_source::StoreBackedSource;
 use crate::presence::Presence;
+use crate::store_adapter::SqliteStore;
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 const REDRIVE_INTERVAL: Duration = Duration::from_secs(5);
 const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const PROBE_TICK: Duration = Duration::from_secs(5);
+const PROBE_INTERVAL_MILLIS: i64 = 20_000;
+const MAX_DRAIN_ROUNDS: usize = 8;
+const MAX_KNOWN_PEERS: usize = 1024;
 
 fn usable_peer_address(ip: &std::net::IpAddr) -> bool {
     match ip {
@@ -26,43 +34,99 @@ fn usable_peer_address(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-pub fn connect_to_peer(peer: &DiscoveredPeer) -> Result<TcpStream, Vec<String>> {
-    let mut tried = Vec::new();
-    let mut addrs: Vec<std::net::IpAddr> = peer.addresses.iter().copied().filter(usable_peer_address).collect();
-    addrs.sort_by_key(|ip| ip.is_ipv6());
-    for ip in addrs {
-        let sock = std::net::SocketAddr::new(ip, peer.port);
-        match TcpStream::connect_timeout(&sock, PEER_CONNECT_TIMEOUT) {
-            Ok(stream) => return Ok(stream),
-            Err(err) => tried.push(format!("{sock} ({err})")),
-        }
-    }
-    let host = format!("{}:{}", peer.host.trim_end_matches('.'), peer.port);
+fn candidate_addresses(peer: &DiscoveredPeer) -> Vec<SocketAddr> {
+    let mut ips: Vec<std::net::IpAddr> = peer.addresses.iter().copied().filter(usable_peer_address).collect();
+    ips.sort_by_key(|ip| ip.is_ipv6());
+    ips.into_iter().map(|ip| SocketAddr::new(ip, peer.port)).collect()
+}
+
+fn resolve_peer_host(peer: &DiscoveredPeer) -> Vec<SocketAddr> {
     use std::net::ToSocketAddrs;
-    if let Ok(resolved) = host.to_socket_addrs() {
-        for sock in resolved {
-            match TcpStream::connect_timeout(&sock, PEER_CONNECT_TIMEOUT) {
-                Ok(stream) => return Ok(stream),
-                Err(err) => tried.push(format!("{sock} via {host} ({err})")),
+    format!("{}:{}", peer.host.trim_end_matches('.'), peer.port)
+        .to_socket_addrs()
+        .map(|resolved| resolved.collect())
+        .unwrap_or_default()
+}
+
+fn try_each_address<T>(
+    peer: &DiscoveredPeer,
+    mut attempt: impl FnMut(SocketAddr) -> Result<T, String>,
+) -> Result<T, Vec<String>> {
+    let mut tried = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for resolve in [candidate_addresses, resolve_peer_host] {
+        for sock in resolve(peer) {
+            if !seen.insert(sock) {
+                continue;
+            }
+            match attempt(sock) {
+                Ok(value) => return Ok(value),
+                Err(err) => tried.push(format!("{sock} ({err})")),
             }
         }
-    } else {
-        tried.push(format!("{host} (did not resolve)"));
+    }
+    if tried.is_empty() {
+        tried.push(format!("{} advertised no usable address", peer.host));
     }
     Err(tried)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run_reappearance_loop(
-    discovery: &Discovery,
+pub fn open_authenticated_channel(
+    peer: &DiscoveredPeer,
     local_keys: &StaticKeypair,
-    store: &mut impl Store,
-    clock: &ExpiryClock,
-    source: &mut impl OutboundSource,
-    roster_lookup: impl Fn(&str) -> Option<[u8; 32]>,
-    emit: &EventSink,
-    presence: &Presence,
-) {
+    remote_static: &[u8; 32],
+) -> Result<AuthenticatedChannel<TcpStream>, Vec<String>> {
+    try_each_address(peer, |sock| {
+        let stream = TcpStream::connect_timeout(&sock, PEER_CONNECT_TIMEOUT).map_err(|e| e.to_string())?;
+        let control = stream.try_clone().map_err(|e| e.to_string())?;
+        control.set_nodelay(true).map_err(|e| e.to_string())?;
+        let set_timeouts = |timeout: Duration| {
+            control.set_read_timeout(Some(timeout))?;
+            control.set_write_timeout(Some(timeout))
+        };
+        set_timeouts(HANDSHAKE_TIMEOUT).map_err(|e| e.to_string())?;
+        let raw = connect_initiator(stream, local_keys, remote_static, |_| true).map_err(|e| e.to_string())?;
+        set_timeouts(CONNECTION_IDLE_TIMEOUT).map_err(|e| e.to_string())?;
+        Ok(raw)
+    })
+}
+
+pub type SharedSink = Arc<dyn Fn(IpcEvent) + Send + Sync>;
+pub type WorkerStoreFactory = Arc<dyn Fn() -> Result<(SqliteStore, StoreBackedSource), String> + Send + Sync>;
+
+#[derive(Clone)]
+pub struct PeerLink {
+    pub local_keys: StaticKeypair,
+    pub clock: ExpiryClock,
+    pub presence: Arc<Presence>,
+    pub emit: SharedSink,
+    pub open_store: WorkerStoreFactory,
+}
+
+pub type PeerDirectory = Arc<Mutex<HashMap<String, DiscoveredPeer>>>;
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn announce_peer(emit: &EventSink, peer_id: &str) {
+    emit(IpcEvent::Changed {
+        resource: IpcResource::Peer,
+        id: Some(peer_id.to_string()),
+    });
+}
+
+fn remember_peer(directory: &PeerDirectory, peer: DiscoveredPeer) {
+    let Some(fingerprint) = peer.fingerprint.clone() else {
+        return;
+    };
+    let mut known = lock(directory);
+    if known.len() < MAX_KNOWN_PEERS || known.contains_key(&fingerprint) {
+        known.insert(fingerprint, peer);
+    }
+}
+
+pub fn run_reappearance_loop(discovery: &Discovery, link: &PeerLink, directory: &PeerDirectory) {
     let events = match discovery.browse() {
         Ok(events) => events,
         Err(err) => {
@@ -70,28 +134,127 @@ pub fn run_reappearance_loop(
             return;
         }
     };
+    let (store, _) = match (link.open_store)() {
+        Ok(opened) => opened,
+        Err(err) => {
+            eprintln!("ferry-daemon: discovery could not open the store: {err}");
+            return;
+        }
+    };
+    let draining: Arc<Mutex<HashSet<String>>> = Arc::default();
 
-    let mut known: HashMap<String, DiscoveredPeer> = HashMap::new();
-
+    let mut next_redrive = Instant::now() + REDRIVE_INTERVAL;
     loop {
-        match events.recv_timeout(REDRIVE_INTERVAL) {
+        match events.recv_timeout(next_redrive.saturating_duration_since(Instant::now())) {
             Ok(ServiceEvent::ServiceResolved(resolved)) => {
                 let peer = peer_from_resolved(&resolved);
-                if let Some(fingerprint) = &peer.fingerprint {
-                    known.insert(fingerprint.clone(), peer.clone());
-                }
-                handle_reappeared_peer(&peer, local_keys, store, clock, source, &roster_lookup, emit, presence);
+                remember_peer(directory, peer.clone());
+                spawn_drain(peer, link, &draining);
             }
-            Ok(_) => {}
-            Err(RecvTimeoutError::Timeout) => {
-                for peer in known.values().cloned().collect::<Vec<_>>() {
-                    if peer_has_pending_work(store, &peer) {
-                        handle_reappeared_peer(&peer, local_keys, store, clock, source, &roster_lookup, emit, presence);
+            Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
+                let gone: Vec<String> = lock(directory)
+                    .iter()
+                    .filter(|(_, peer)| peer.fullname == fullname)
+                    .map(|(fingerprint, _)| fingerprint.clone())
+                    .collect();
+                for fingerprint in gone {
+                    if link.presence.contact_failed(&fingerprint) {
+                        announce_peer(link.emit.as_ref(), &fingerprint);
                     }
                 }
             }
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+        if Instant::now() >= next_redrive {
+            next_redrive = Instant::now() + REDRIVE_INTERVAL;
+            let known: Vec<DiscoveredPeer> = lock(directory).values().cloned().collect();
+            for peer in known {
+                if peer_has_pending_work(&store, &peer) {
+                    spawn_drain(peer, link, &draining);
+                }
+            }
+        }
+    }
+}
+
+fn spawn_drain(peer: DiscoveredPeer, link: &PeerLink, draining: &Arc<Mutex<HashSet<String>>>) {
+    let Some(fingerprint) = peer.fingerprint.clone() else {
+        return;
+    };
+    if !lock(draining).insert(fingerprint.clone()) {
+        return;
+    }
+    let link = link.clone();
+    let release = draining.clone();
+    let released = fingerprint.clone();
+    let spawned = std::thread::Builder::new().name("ferry-drain".into()).spawn(move || {
+        match (link.open_store)() {
+            Ok((mut store, mut source)) => {
+                let remote_static = store.sealing_key_for_peer_id(&fingerprint);
+                handle_reappeared_peer(
+                    &peer,
+                    &link.local_keys,
+                    &mut store,
+                    &link.clock,
+                    &mut source,
+                    &|_: &str| remote_static,
+                    link.emit.as_ref(),
+                    &link.presence,
+                );
+            }
+            Err(err) => eprintln!("ferry-daemon: could not open the store to reach {fingerprint}: {err}"),
+        }
+        lock(&release).remove(&fingerprint);
+    });
+    if let Err(err) = spawned {
+        eprintln!("ferry-daemon: could not start a delivery thread for {released}: {err}");
+        lock(draining).remove(&released);
+    }
+}
+
+pub fn run_presence_loop(link: &PeerLink, directory: &PeerDirectory) {
+    let (store, _) = match (link.open_store)() {
+        Ok(opened) => opened,
+        Err(err) => {
+            eprintln!("ferry-daemon: the presence probe could not open the store: {err}");
+            return;
+        }
+    };
+    let mut was_reachable: HashMap<String, bool> = HashMap::new();
+    loop {
+        let known: Vec<DiscoveredPeer> = lock(directory).values().cloned().collect();
+        let due: Vec<(String, DiscoveredPeer, [u8; 32])> = known
+            .into_iter()
+            .filter_map(|peer| {
+                let fingerprint = peer.fingerprint.clone()?;
+                let remote_static = store.sealing_key_for_peer_id(&fingerprint)?;
+                link.presence
+                    .contact_is_due(&fingerprint, PROBE_INTERVAL_MILLIS)
+                    .then_some((fingerprint, peer, remote_static))
+            })
+            .collect();
+
+        std::thread::scope(|scope| {
+            for (fingerprint, peer, remote_static) in &due {
+                scope.spawn(move || {
+                    match open_authenticated_channel(peer, &link.local_keys, remote_static) {
+                        Ok(_) => link.presence.seen(fingerprint),
+                        Err(_) => link.presence.contact_failed(fingerprint),
+                    };
+                });
+            }
+        });
+
+        if let Ok(peers) = ferry_store::roster::list_peers(store.conn()) {
+            for peer in peers {
+                let reachable = link.presence.is_reachable(&peer.peer_id);
+                if was_reachable.insert(peer.peer_id.clone(), reachable).unwrap_or(false) != reachable {
+                    announce_peer(link.emit.as_ref(), &peer.peer_id);
+                }
+            }
+        }
+        std::thread::sleep(PROBE_TICK);
     }
 }
 
@@ -126,39 +289,43 @@ fn handle_reappeared_peer(
     let Some(remote_static) = roster_lookup(fingerprint) else {
         return;
     };
-    presence.seen(fingerprint);
-    emit(IpcEvent::Changed {
-        resource: IpcResource::Peer,
-        id: Some(fingerprint.clone()),
-    });
+    for _ in 0..MAX_DRAIN_ROUNDS {
+        if !drain_round(peer, fingerprint, &remote_static, local_keys, store, clock, source, emit, presence) {
+            break;
+        }
+    }
+}
 
-    let stream = match connect_to_peer(peer) {
-        Ok(stream) => stream,
-        Err(tried) => {
-            eprintln!("ferry-daemon: could not connect to reappeared peer {fingerprint}: tried {}", tried.join(", "));
-            return;
-        }
-    };
-    if let Err(err) = stream.set_read_timeout(Some(CONNECTION_IDLE_TIMEOUT)) {
-        eprintln!("ferry-daemon: could not set read timeout for {fingerprint}: {err}");
-        return;
-    }
-    if let Err(err) = stream.set_write_timeout(Some(CONNECTION_IDLE_TIMEOUT)) {
-        eprintln!("ferry-daemon: could not set write timeout for {fingerprint}: {err}");
-        return;
-    }
-    let raw = match connect_initiator(stream, local_keys, &remote_static, |_| true) {
+#[allow(clippy::too_many_arguments)]
+fn drain_round(
+    peer: &DiscoveredPeer,
+    fingerprint: &str,
+    remote_static: &[u8; 32],
+    local_keys: &StaticKeypair,
+    store: &mut impl Store,
+    clock: &ExpiryClock,
+    source: &mut impl OutboundSource,
+    emit: &EventSink,
+    presence: &Presence,
+) -> bool {
+    let raw = match open_authenticated_channel(peer, local_keys, remote_static) {
         Ok(raw) => raw,
-        Err(err) => {
-            eprintln!("ferry-daemon: handshake with reappeared peer {fingerprint} failed: {err}");
-            return;
+        Err(tried) => {
+            eprintln!("ferry-daemon: could not reach peer {fingerprint}: tried {}", tried.join(", "));
+            if presence.contact_failed(fingerprint) {
+                announce_peer(emit, fingerprint);
+            }
+            return false;
         }
     };
+    if presence.seen(fingerprint) {
+        announce_peer(emit, fingerprint);
+    }
     let mut channel = NetChannel::new(raw);
 
-    let mut last_progress = std::time::Instant::now() - PROGRESS_INTERVAL;
+    let mut last_progress = Instant::now() - PROGRESS_INTERVAL;
     let mut on_progress = |item_id: &str, bytes: u64, total: u64| {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         if bytes >= total || now.duration_since(last_progress) >= PROGRESS_INTERVAL {
             last_progress = now;
             emit(IpcEvent::Progress { item_id: item_id.to_string(), bytes, total });
@@ -192,8 +359,12 @@ fn handle_reappeared_peer(
                     id: Some(item_id.clone()),
                 });
             }
+            !outcome.awaiting_decision.is_empty() && !outcome.deferred.is_empty()
         }
-        Err(err) => eprintln!("ferry-daemon: failed to drain outbox to {fingerprint}: {err}"),
+        Err(err) => {
+            eprintln!("ferry-daemon: failed to drain outbox to {fingerprint}: {err}");
+            false
+        }
     }
 }
 
@@ -205,6 +376,54 @@ mod tests {
     use ferry_proto::states::{ItemKind, TransferState};
     use std::io::Cursor;
     use std::net::TcpListener;
+
+    fn connect_to_peer(peer: &DiscoveredPeer) -> Result<TcpStream, Vec<String>> {
+        try_each_address(peer, |sock| {
+            TcpStream::connect_timeout(&sock, PEER_CONNECT_TIMEOUT).map_err(|e| e.to_string())
+        })
+    }
+
+    #[test]
+    fn an_address_that_answers_with_the_wrong_identity_does_not_hide_the_one_that_is_the_peer() {
+        let Some(lan_ip) = lan_ip() else { return };
+        let real = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = real.local_addr().unwrap().port();
+        let Ok(impostor) = TcpListener::bind((lan_ip, port)) else { return };
+
+        let local_keys = generate_keypair();
+        let local_public = local_keys.public;
+        let remote_keys = generate_keypair();
+        let remote_public = remote_keys.public;
+        let stranger_keys = generate_keypair();
+
+        std::thread::spawn(move || {
+            let (stream, _) = impostor.accept().unwrap();
+            let _ = accept_responder(stream, &stranger_keys, |_| true);
+        });
+        let responder = std::thread::spawn(move || {
+            let (stream, _) = real.accept().unwrap();
+            accept_responder(stream, &remote_keys, move |remote: &[u8; 32]| *remote == local_public).is_ok()
+        });
+
+        let peer = DiscoveredPeer {
+            fullname: "peer._ferry._tcp.local.".into(),
+            host: "127.0.0.1".into(),
+            addresses: vec![lan_ip],
+            port,
+            fingerprint: Some("peer".into()),
+            protocol_version: None,
+        };
+        let channel = open_authenticated_channel(&peer, &local_keys, &remote_public)
+            .expect("the second address is the real peer and must still be tried");
+        assert_eq!(channel.remote_static, remote_public);
+        assert!(responder.join().unwrap());
+    }
+
+    fn lan_ip() -> Option<std::net::IpAddr> {
+        let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        s.connect("8.8.8.8:80").ok()?;
+        s.local_addr().ok().map(|a| a.ip()).filter(usable_peer_address)
+    }
 
     struct FileSource;
 
@@ -374,7 +593,7 @@ mod tests {
             fingerprint: Some("ghost".into()),
             protocol_version: Some("2".into()),
         };
-        let started = std::time::Instant::now();
+        let started = Instant::now();
         let result = connect_to_peer(&peer);
         assert!(result.is_err());
         assert!(

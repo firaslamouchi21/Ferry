@@ -8,6 +8,7 @@ use std::time::Duration;
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use ferry_core::pairing;
+use ferry_proto::errors::ErrorCode;
 use ferry_proto::ipc::{
     IpcEnvelope, IpcOutcome, IpcRequest, IpcResponse, IpcResult, RequestId, IPC_PROTOCOL_VERSION,
 };
@@ -305,35 +306,13 @@ enum SentCommand {
     Retry { item_id: String },
 }
 
-fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
-    let has_override = SOCKET_OVERRIDE.get().and_then(|o| o.clone()).is_some();
-    let is_status_probe = matches!(request, IpcRequest::Status);
-    let socket_path = match SOCKET_OVERRIDE.get().and_then(|o| o.clone()) {
-        Some(path) => path,
-        None => {
-            let data_dir = ferry_core::config::default_data_dir();
-            ferry_core::config::ipc_socket_path(&data_dir)
-        }
-    };
-
-    let mut stream = match ferry_net::local_ipc::connect(&socket_path) {
-        Ok(stream) => stream,
-        Err(source) if has_override || is_status_probe => {
-            return Err(format!(
-                "unreachable: could not connect to the ferry daemon at {} — is it running? ({source})",
-                socket_path.display()
-            ));
-        }
-        Err(_) => {
-            start_daemon_if_needed()?;
-            ferry_net::local_ipc::connect(&socket_path).map_err(|source| {
-                format!(
-                    "unreachable: could not connect to the ferry daemon at {} — is it running? ({source})",
-                    socket_path.display()
-                )
-            })?
-        }
-    };
+fn send_ipc_request(socket_path: &Path, request: IpcRequest) -> Result<IpcResponse, String> {
+    let mut stream = ferry_net::local_ipc::connect(socket_path).map_err(|source| {
+        format!(
+            "unreachable: could not connect to the ferry daemon at {} — is it running? ({source})",
+            socket_path.display()
+        )
+    })?;
 
     let envelope = IpcEnvelope {
         ipc_protocol_version: IPC_PROTOCOL_VERSION,
@@ -347,7 +326,86 @@ fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
 
     let response_bytes = ferry_net::framing::read_frame_with_max(&mut stream, ferry_net::framing::IPC_MAX_FRAME_BYTES)
         .map_err(|e| e.to_string())?;
-    let response: IpcResponse = serde_json::from_slice(&response_bytes).map_err(|e| e.to_string())?;
+    serde_json::from_slice(&response_bytes).map_err(|e| e.to_string())
+}
+
+fn daemon_lock_holder(data_dir: &Path) -> Option<u32> {
+    let lock_path = data_dir.join("ferry.lock");
+    let lock = std::fs::File::open(&lock_path).ok()?;
+    if lock.try_lock_shared().is_ok() {
+        let _ = lock.unlock();
+        return None;
+    }
+    std::fs::read_to_string(&lock_path)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("pid="))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+#[cfg(unix)]
+fn terminate_pid(pid: u32) {
+    let _ = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+}
+
+#[cfg(windows)]
+fn terminate_pid(pid: u32) {
+    let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).status();
+}
+
+fn wait_for_daemon_exit() -> bool {
+    for _ in 0..50 {
+        if !daemon_is_running() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+fn yield_to_a_fresh_daemon(socket_path: &Path) -> Result<(), String> {
+    eprintln!("ferry: daemon speaks an incompatible IPC protocol version — restarting it");
+    let _ = send_ipc_request(socket_path, IpcRequest::Quit);
+    if !wait_for_daemon_exit() {
+        if let Some(pid) = daemon_lock_holder(&ferry_core::config::default_data_dir()) {
+            terminate_pid(pid);
+        }
+        if !wait_for_daemon_exit() {
+            return Err("unreachable: the incompatible ferry daemon did not shut down".into());
+        }
+    }
+    start_daemon_if_needed().map(|_| ())
+}
+
+fn ipc_call(request: IpcRequest) -> Result<IpcResult, String> {
+    let has_override = SOCKET_OVERRIDE.get().and_then(|o| o.clone()).is_some();
+    let is_status_probe = matches!(request, IpcRequest::Status);
+    let socket_path = match SOCKET_OVERRIDE.get().and_then(|o| o.clone()) {
+        Some(path) => path,
+        None => {
+            let data_dir = ferry_core::config::default_data_dir();
+            ferry_core::config::ipc_socket_path(&data_dir)
+        }
+    };
+
+    if ferry_net::local_ipc::connect(&socket_path).is_err() {
+        if has_override || is_status_probe {
+            return Err(format!(
+                "unreachable: could not connect to the ferry daemon at {} — is it running?",
+                socket_path.display()
+            ));
+        }
+        start_daemon_if_needed()?;
+    }
+
+    let response = send_ipc_request(&socket_path, request.clone())?;
+    let response = match response.outcome {
+        IpcOutcome::Err { ref error } if error.code == ErrorCode::ProtocolVersionMismatch && !has_override => {
+            yield_to_a_fresh_daemon(&socket_path)?;
+            send_ipc_request(&socket_path, request)?
+        }
+        _ => response,
+    };
 
     match response.outcome {
         IpcOutcome::Ok { value } => Ok(value),
@@ -1379,5 +1437,27 @@ mod tests {
             cli.command,
             Command::Inbox { command: InboxCommand::Reject { item_id, yes: true } } if item_id == "item-7"
         ));
+    }
+
+    #[test]
+    fn a_lock_file_names_a_daemon_only_while_something_actually_holds_it() {
+        let data_dir = std::env::temp_dir().join(format!("ferry-lock-pid-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&data_dir).unwrap();
+        assert_eq!(daemon_lock_holder(&data_dir), None, "no lock file yet");
+
+        std::fs::write(data_dir.join("ferry.lock"), "pid=4242\nport=9\n").unwrap();
+        assert_eq!(
+            daemon_lock_holder(&data_dir),
+            None,
+            "a stale lock file must never lead to a recycled pid being killed"
+        );
+
+        #[cfg(unix)]
+        {
+            let held = std::fs::File::open(data_dir.join("ferry.lock")).unwrap();
+            held.lock().unwrap();
+            assert_eq!(daemon_lock_holder(&data_dir), Some(4242));
+        }
+        std::fs::remove_dir_all(&data_dir).unwrap();
     }
 }

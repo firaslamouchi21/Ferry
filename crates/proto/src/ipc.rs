@@ -167,6 +167,8 @@ pub struct DaemonStatus {
     pub discovery_ok: bool,
     pub transport_ok: bool,
     pub store_ok: bool,
+    #[serde(default)]
+    pub daemon_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

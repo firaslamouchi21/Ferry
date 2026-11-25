@@ -1,18 +1,27 @@
+use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ferry_core::expiry::ExpiryClock;
 use ferry_core::ports::Store;
-use ferry_core::transfer::{receive_next_inbound, InboundEvent};
+use ferry_core::transfer::{receive_next_inbound, InboundEvent, TransferError};
 use ferry_net::transport::{accept_responder, StaticKeypair};
 use ferry_proto::ipc::{IpcEvent, IpcResource};
 use ferry_proto::states::ItemKind;
 use thiserror::Error;
 
 use crate::channel_adapter::NetChannel;
+use crate::discovery::PeerLink;
 use crate::event_bus::EventSink;
+use crate::presence::Presence;
 
 const CONNECTION_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(200);
+const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 100;
+const MAX_ACTIVE_CONNECTIONS: usize = 64;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, Error)]
@@ -27,18 +36,85 @@ pub fn bind(port: u16) -> Result<TcpListener, P2pError> {
     TcpListener::bind(("0.0.0.0", port)).map_err(|source| P2pError::Bind { port, source })
 }
 
-pub fn serve_incoming(
-    listener: &TcpListener,
-    local_keys: &StaticKeypair,
-    store: &mut impl Store,
-    clock: &ExpiryClock,
-    peer_id_for: impl Fn(&[u8; 32]) -> Option<String>,
-    auto_accept: bool,
-    emit: &EventSink,
-) -> Result<(), P2pError> {
+pub fn serve_incoming(listener: &TcpListener, link: &PeerLink, auto_accept: bool) -> Result<(), P2pError> {
+    let locks = Arc::new(PeerLocks::default());
+    let active = Arc::new(AtomicUsize::new(0));
+    let mut consecutive_failures = 0u32;
     loop {
-        let (stream, _addr) = listener.accept().map_err(P2pError::Accept)?;
-        handle_incoming_connection(stream, local_keys, store, clock, &peer_id_for, auto_accept, CONNECTION_IDLE_TIMEOUT, emit);
+        let stream = match listener.accept() {
+            Ok((stream, _addr)) => stream,
+            Err(err) => {
+                consecutive_failures += 1;
+                if consecutive_failures > MAX_CONSECUTIVE_ACCEPT_FAILURES {
+                    return Err(P2pError::Accept(err));
+                }
+                eprintln!("ferry-daemon: could not accept an incoming P2P connection: {err}");
+                std::thread::sleep(ACCEPT_RETRY_DELAY);
+                continue;
+            }
+        };
+        consecutive_failures = 0;
+        if active.fetch_add(1, Ordering::SeqCst) >= MAX_ACTIVE_CONNECTIONS {
+            active.fetch_sub(1, Ordering::SeqCst);
+            continue;
+        }
+        let link = link.clone();
+        let locks = locks.clone();
+        let slot = ActiveSlot(active.clone());
+        let spawned = std::thread::Builder::new().name("ferry-p2p".into()).spawn(move || {
+            let _slot = slot;
+            match (link.open_store)() {
+                Ok((mut store, _)) => {
+                    let roster = match (link.open_store)() {
+                        Ok((roster, _)) => roster,
+                        Err(err) => {
+                            eprintln!("ferry-daemon: could not open the roster for an incoming connection: {err}");
+                            return;
+                        }
+                    };
+                    handle_incoming_connection(
+                        stream,
+                        &link.local_keys,
+                        &mut store,
+                        &link.clock,
+                        &|remote: &[u8; 32]| roster.peer_id_for_static(remote),
+                        auto_accept,
+                        CONNECTION_IDLE_TIMEOUT,
+                        link.emit.as_ref(),
+                        &link.presence,
+                        &locks,
+                    );
+                }
+                Err(err) => eprintln!("ferry-daemon: could not open the store for an incoming connection: {err}"),
+            }
+        });
+        if let Err(err) = spawned {
+            eprintln!("ferry-daemon: could not start a thread for an incoming connection: {err}");
+        }
+    }
+}
+
+struct ActiveSlot(Arc<AtomicUsize>);
+
+impl Drop for ActiveSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[derive(Default)]
+pub struct PeerLocks {
+    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl PeerLocks {
+    fn for_peer(&self, peer_id: &str) -> Arc<Mutex<()>> {
+        self.locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(peer_id.to_string())
+            .or_default()
+            .clone()
     }
 }
 
@@ -52,8 +128,20 @@ fn handle_incoming_connection(
     auto_accept: bool,
     idle_timeout: Duration,
     emit: &EventSink,
+    presence: &Presence,
+    locks: &PeerLocks,
 ) {
-    if let Err(err) = stream.set_read_timeout(Some(idle_timeout)) {
+    let control = match stream.try_clone() {
+        Ok(control) => control,
+        Err(err) => {
+            eprintln!("ferry-daemon: failed to prepare an incoming P2P connection: {err}");
+            return;
+        }
+    };
+    if let Err(err) = control.set_nodelay(true) {
+        eprintln!("ferry-daemon: failed to disable write coalescing on an incoming P2P connection: {err}");
+    }
+    if let Err(err) = stream.set_read_timeout(Some(idle_timeout.min(HANDSHAKE_TIMEOUT))) {
         eprintln!("ferry-daemon: failed to set a read timeout on an incoming P2P connection: {err}");
         return;
     }
@@ -75,8 +163,21 @@ fn handle_incoming_connection(
         return;
     };
 
+    if let Err(err) = control.set_read_timeout(Some(idle_timeout)) {
+        eprintln!("ferry-daemon: failed to set a read timeout on a connection from {peer_id}: {err}");
+        return;
+    }
+    if presence.seen(&peer_id) {
+        emit(IpcEvent::Changed {
+            resource: IpcResource::Peer,
+            id: Some(peer_id.clone()),
+        });
+    }
+
     let mut channel = NetChannel::new(raw);
-    println!("ferry-daemon: accepted a P2P connection from {peer_id}");
+    let peer_lock = locks.for_peer(&peer_id);
+    let _exclusive = peer_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut handled_any = false;
 
     let mut last_progress = std::time::Instant::now() - PROGRESS_INTERVAL;
     loop {
@@ -87,7 +188,11 @@ fn handle_incoming_connection(
                 emit(IpcEvent::Progress { item_id: item_id.to_string(), bytes, total });
             }
         };
-        match receive_next_inbound(&mut channel, store, clock, &peer_id, &peer_id, auto_accept, &mut on_progress) {
+        let received = receive_next_inbound(&mut channel, store, clock, &peer_id, &peer_id, auto_accept, &mut on_progress);
+        if received.is_ok() {
+            presence.seen(&peer_id);
+        }
+        match received {
             Ok(InboundEvent::ItemDelivered(offer)) => {
                 println!("ferry-daemon: received item {} from {peer_id}", offer.item_id.0);
                 let resource = if offer.kind == ItemKind::Message {
@@ -116,11 +221,17 @@ fn handle_incoming_connection(
                 println!("ferry-daemon: {peer_id} reported opening item {item_id}");
                 emit(IpcEvent::Changed { resource: IpcResource::Transfer, id: Some(item_id) });
             }
+            Err(TransferError::Channel(_)) if !handled_any => break,
             Err(err) => {
                 println!("ferry-daemon: P2P connection from {peer_id} ended: {err}");
+                emit(IpcEvent::Changed {
+                    resource: IpcResource::Transfer,
+                    id: None,
+                });
                 break;
             }
         }
+        handled_any = true;
     }
 }
 
@@ -171,6 +282,8 @@ mod tests {
                 true,
                 CONNECTION_IDLE_TIMEOUT,
                 &|event| events.borrow_mut().push(event),
+                &Presence::new(),
+                &PeerLocks::default(),
             );
             (store, events.into_inner())
         });
@@ -238,7 +351,7 @@ mod tests {
             );
             let clock = ExpiryClock::new();
             let (stream, _addr) = listener.accept().unwrap();
-            handle_incoming_connection(stream, &responder_keys, &mut store, &clock, &|_: &[u8; 32]| None, true, CONNECTION_IDLE_TIMEOUT, &crate::event_bus::noop_sink);
+            handle_incoming_connection(stream, &responder_keys, &mut store, &clock, &|_: &[u8; 32]| None, true, CONNECTION_IDLE_TIMEOUT, &crate::event_bus::noop_sink, &Presence::new(), &PeerLocks::default());
         });
 
         let stream = TcpStream::connect(addr).unwrap();
@@ -273,6 +386,8 @@ mod tests {
             true,
             std::time::Duration::from_millis(200),
             &crate::event_bus::noop_sink,
+            &Presence::new(),
+            &PeerLocks::default(),
         );
         let elapsed = started.elapsed();
 

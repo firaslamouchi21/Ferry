@@ -194,6 +194,8 @@ jobs:
         run: bash testing/local-two-peer.sh
       - name: Invariant suite — roster enforcement, burn, TTL-from-delivery, offline drain, content-free audit
         run: bash testing/verify-invariants.sh
+      - name: Deferred accept — delivery follows the human accept within seconds, and open receipts are acknowledged
+        run: bash testing/deferred-accept.sh
 
   two-peer-strict:
     name: Two-peer full invariant suite over real multicast (hard failure)
