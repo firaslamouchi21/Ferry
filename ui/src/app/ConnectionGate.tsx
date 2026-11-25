@@ -62,7 +62,7 @@ function DaemonDownPanel({ connecting }: { connecting: boolean }) {
   }, [client]);
 
   useEffect(() => {
-    if (autoTried.current || !client.canStartDaemon()) return;
+    if (autoTried.current || !client.canStartDaemon() || client.host === "vscode") return;
     autoTried.current = true;
     void start();
   }, [client, start]);

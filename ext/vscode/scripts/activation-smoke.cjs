@@ -60,7 +60,11 @@ const vscodeStub = {
   },
   workspace: {
     getConfiguration: () => ({
-      get: (key) => (key === "daemonPath" ? "/nonexistent/ferry-daemon-smoke" : undefined),
+      get: (key, fallback) => {
+        if (key === "daemonPath") return "/nonexistent/ferry-daemon-smoke";
+        if (key === "socketPath") return "/nonexistent/ferry-smoke.sock";
+        return fallback;
+      },
     }),
   },
   env: { clipboard: { writeText: () => Promise.resolve() } },
@@ -79,6 +83,7 @@ const context = {
   subscriptions: [],
   extensionUri: { fsPath: path.resolve(__dirname, ".."), path: path.resolve(__dirname, "..") },
   extensionPath: path.resolve(__dirname, ".."),
+  extension: { packageJSON: require("../package.json") },
   globalStorageUri: { fsPath: require("node:os").tmpdir(), path: require("node:os").tmpdir() },
 };
 

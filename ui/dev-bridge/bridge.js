@@ -16,7 +16,7 @@ export function defaultSocketPath() {
     return path.join(home, "Library", "Application Support", "dev.ferry.ferry", "ferry.sock");
   }
   if (process.platform === "win32") {
-    return "\\\\.\\pipe\\ferry.sock";
+    return `\\\\.\\pipe\\${(process.env.USERNAME ?? "").replace(/[^A-Za-z0-9_-]/g, "_")}-ferry.sock`;
   }
   const base = process.env.XDG_DATA_HOME ?? path.join(home, ".local", "share");
   return path.join(base, "ferry", "ferry.sock");

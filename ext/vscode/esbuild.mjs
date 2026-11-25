@@ -14,11 +14,13 @@ const options = {
   format: "cjs",
   target: "node18",
   external: ["vscode"],
-  sourcemap: true,
+  sourcemap: watch,
+  minify: !watch,
 };
 
 function copyUi() {
   const src = path.join(root, "../../ui/dist");
+  rmSync(path.join(root, "dist"), { recursive: true, force: true });
   const dest = path.join(root, "media/ui");
   rmSync(dest, { recursive: true, force: true });
   mkdirSync(dest, { recursive: true });
