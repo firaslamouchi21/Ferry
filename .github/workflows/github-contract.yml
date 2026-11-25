@@ -3,9 +3,10 @@ name: GitHub provider contract
 # Runs the tests that hit the real GitHub API. Manual only, and a no-op unless
 # GITHUB_TEST_TOKEN is set (a PAT with the `gist` scope). See docs/GITHUB_APP_SETUP.md.
 
-# Weekly schedule is disabled. Run manually from the Actions tab if needed.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "23 7 * * 1"
 
 permissions:
   contents: read
