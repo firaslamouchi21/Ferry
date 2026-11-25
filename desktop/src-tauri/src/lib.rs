@@ -5,9 +5,14 @@ use std::time::Duration;
 use ferry_net::local_ipc;
 
 use serde_json::Value;
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 
 const MAX_FRAME_BYTES: usize = ferry_net::framing::IPC_MAX_FRAME_BYTES;
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 struct DaemonSocket(Mutex<Option<std::thread::JoinHandle<()>>>);
 
@@ -29,7 +34,10 @@ fn daemon_reachable() -> bool {
     local_ipc::connect(&socket_path()).is_ok()
 }
 
+static SPAWNING: Mutex<()> = Mutex::new(());
+
 fn spawn_daemon() -> Result<u32, String> {
+    let _only_one = SPAWNING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if daemon_reachable() {
         return Ok(0);
     }
@@ -41,6 +49,8 @@ fn spawn_daemon() -> Result<u32, String> {
         .stderr(std::process::Stdio::null());
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, CREATE_NO_WINDOW);
     let child = command
         .spawn()
         .map_err(|e| format!("could not start {}: {e}", bin.display()))?;
@@ -54,7 +64,7 @@ fn spawn_daemon() -> Result<u32, String> {
     Err(format!("ferry-daemon (pid {pid}) did not accept a connection within 5s"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn daemon_running() -> bool {
     daemon_reachable()
 }
@@ -95,7 +105,7 @@ async fn pick_save_path(app: tauri::AppHandle, name: String) -> Option<PickedFil
         .map(picked)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn write_file(path: String, content_base64: String) -> Result<(), String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -104,9 +114,89 @@ fn write_file(path: String, content_base64: String) -> Result<(), String> {
     std::fs::write(&path, bytes).map_err(|e| format!("could not write {path}: {e}"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn start_daemon() -> Result<(), String> {
     spawn_daemon().map(|_| ())
+}
+
+fn daemon_status_label(reachable: bool) -> &'static str {
+    if reachable {
+        "Daemon: running"
+    } else {
+        "Daemon: not running"
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let status_item = MenuItemBuilder::with_id("status", daemon_status_label(daemon_reachable()))
+        .enabled(false)
+        .build(app)?;
+    let show_item = MenuItemBuilder::with_id("show", "Show Ferry").build(app)?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&status_item, &show_item, &separator, &quit_item])
+        .build()?;
+
+    let mut builder = TrayIconBuilder::with_id("ferry-tray").tooltip("Ferry");
+    if let Some(icon) = app.default_window_icon().cloned() {
+        builder = builder.icon(icon);
+    }
+    builder
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => show_main_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                button_state: tauri::tray::MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                if let Some(window) = app.get_webview_window("main") {
+                    if window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
+                        show_main_window(app);
+                    }
+                }
+            }
+        })
+        .build(app)?;
+
+    let app_for_poll = app.clone();
+    std::thread::spawn(move || {
+        let mut last_reachable = None;
+        loop {
+            let reachable = daemon_reachable();
+            if last_reachable != Some(reachable) {
+                let _ = status_item.set_text(daemon_status_label(reachable));
+                if let Some(tray) = app_for_poll.tray_by_id("ferry-tray") {
+                    let _ = tray.set_tooltip(Some(format!(
+                        "Ferry — {}",
+                        daemon_status_label(reachable)
+                    )));
+                }
+                last_reachable = Some(reachable);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    Ok(())
 }
 
 fn write_frame<W: Write>(stream: &mut W, payload: &[u8]) -> std::io::Result<()> {
@@ -127,7 +217,7 @@ fn read_frame<R: Read>(stream: &mut R) -> std::io::Result<Vec<u8>> {
     Ok(body)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ipc_request(envelope: Value) -> Result<Value, String> {
     let mut stream = local_ipc::connect(&socket_path()).map_err(|e| e.to_string())?;
     let bytes = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
@@ -136,9 +226,9 @@ fn ipc_request(envelope: Value) -> Result<Value, String> {
     serde_json::from_slice(&response).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn ipc_subscribe(app: tauri::AppHandle, state: tauri::State<DaemonSocket>) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
+    let mut guard = state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(handle) = guard.as_ref() {
         if !handle.is_finished() {
             return Ok(());
@@ -243,20 +333,21 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
-            }
+            show_main_window(app);
         }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .manage(DaemonSocket(Mutex::new(None)))
-        .setup(|_app| {
+        .setup(|app| {
             std::thread::spawn(|| {
                 if let Err(err) = spawn_daemon() {
                     eprintln!("ferry-desktop: could not auto-start the daemon: {err}");
                 }
             });
+            if let Err(err) = build_tray(app.handle()) {
+                eprintln!("ferry-desktop: no tray icon on this system: {err}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

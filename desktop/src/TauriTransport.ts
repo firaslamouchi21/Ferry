@@ -25,6 +25,7 @@ export class TauriTransport implements Transport {
       const unlistenClosed = await listen("ferry://subscribe-closed", () => {
         if (gen !== this.generation) return;
         this.setPhase("disconnected");
+        this.clearRetry();
         this.retryTimer = setTimeout(() => void this.attempt(gen), 1500);
       });
       if (gen !== this.generation) {
@@ -51,14 +52,19 @@ export class TauriTransport implements Transport {
     } catch {
       if (gen !== this.generation) return;
       this.setPhase("disconnected");
+      this.clearRetry();
       this.retryTimer = setTimeout(() => void this.attempt(gen), 1500);
     }
   }
 
-  stop(): void {
-    this.generation++;
+  private clearRetry(): void {
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
+  }
+
+  stop(): void {
+    this.generation++;
+    this.clearRetry();
     this.unlisten?.();
     this.unlisten = null;
     this.unlistenClosed?.();
@@ -66,8 +72,7 @@ export class TauriTransport implements Transport {
   }
 
   retryNow(): void {
-    if (this.retryTimer) clearTimeout(this.retryTimer);
-    this.retryTimer = null;
+    this.clearRetry();
     void this.attempt(this.generation);
   }
 
@@ -84,8 +89,12 @@ export class TauriTransport implements Transport {
     return invoke<PickedFile | null>("pick_file");
   }
 
+  pickSavePath(name: string): Promise<PickedFile | null> {
+    return invoke<PickedFile | null>("pick_save_path", { name });
+  }
+
   async saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean> {
-    const target = await invoke<PickedFile | null>("pick_save_path", { name });
+    const target = await this.pickSavePath(name);
     if (!target) return false;
     const bytes = await produce();
     let binary = "";
