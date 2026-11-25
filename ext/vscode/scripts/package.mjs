@@ -11,8 +11,9 @@ const opt = (name) => {
 };
 
 const target = opt("target");
+const universal = args.includes("--universal");
 const daemon = opt("daemon") ?? process.env.FERRY_DAEMON_BIN;
-const out = opt("out") ?? (target ? `ferry-${target}.vsix` : "ferry.vsix");
+const out = opt("out") ?? (universal ? "ferry-universal.vsix" : target ? `ferry-${target}.vsix` : "ferry.vsix");
 
 const licenseText = readFileSync(path.join(root, "../../LICENSE"), "utf8");
 writeFileSync(path.join(root, "LICENSE"), licenseText);
@@ -28,17 +29,35 @@ if (daemonVersion !== manifest.version) {
 const binDir = path.join(root, "bin");
 rmSync(binDir, { recursive: true, force: true });
 
-if (daemon) {
-  if (!existsSync(daemon)) {
-    console.error(`--daemon path does not exist: ${daemon}`);
+const UNIVERSAL_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
+
+function bundle(source, folder, isWin) {
+  if (!existsSync(source)) {
+    console.error(`--daemon path does not exist: ${source}`);
     process.exit(1);
   }
-  mkdirSync(binDir, { recursive: true });
-  const isWin = target?.startsWith("win32") || daemon.endsWith(".exe");
-  const dest = path.join(binDir, isWin ? "ferry-daemon.exe" : "ferry-daemon");
-  copyFileSync(daemon, dest);
+  mkdirSync(folder, { recursive: true });
+  const dest = path.join(folder, isWin ? "ferry-daemon.exe" : "ferry-daemon");
+  copyFileSync(source, dest);
   if (!isWin) chmodSync(dest, 0o755);
-  console.log(`bundled ${daemon} -> ${dest}`);
+  console.log(`bundled ${source} -> ${dest}`);
+}
+
+if (universal) {
+  if (target) {
+    console.error("--universal and --target cannot be combined");
+    process.exit(1);
+  }
+  for (const platform of UNIVERSAL_PLATFORMS) {
+    const source = opt(platform);
+    if (!source) {
+      console.error(`--universal needs --${platform} <path to that platform's ferry-daemon>`);
+      process.exit(1);
+    }
+    bundle(source, path.join(binDir, platform), platform.startsWith("win32"));
+  }
+} else if (daemon) {
+  bundle(daemon, binDir, Boolean(target?.startsWith("win32")) || daemon.endsWith(".exe"));
 } else {
   console.log("no --daemon given: packaging a generic .vsix (extension falls back to ferry.daemonPath / PATH)");
 }

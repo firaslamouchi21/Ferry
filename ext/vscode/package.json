@@ -1,6 +1,6 @@
 {
-  "name": "ferry-vscode",
-  "displayName": "Ferry",
+  "name": "ferry-p2p",
+  "displayName": "Ferry P2P",
   "description": "Send files, secrets, and short messages straight to your teammates' machines over the local network — no server, no cloud, no account",
   "private": true,
   "version": "1.0.0",
