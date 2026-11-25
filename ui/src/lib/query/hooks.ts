@@ -189,7 +189,12 @@ export function useConfirmOpened() {
 
 export function usePeerRemove() {
   const ferry = useFerryClient();
-  return useInvalidating((peerId: string) => ferry.peerRemove(peerId), [queryKeys.roster]);
+  return useInvalidating((peerId: string) => ferry.peerRemove(peerId), [
+    queryKeys.roster,
+    queryKeys.sent,
+    queryKeys.messages,
+    queryKeys.audit,
+  ]);
 }
 
 export function useSentAbort() {

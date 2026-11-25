@@ -351,6 +351,12 @@ if [ "$MDNS_OK" = 1 ]; then
 fi
 
 echo
+echo "== removing a peer that has transfer history =="
+peer a "$CLI" peer remove "$BID" --yes >/dev/null 2>&1 && ok "a peer with history can be removed" || bad "removing a peer with history failed"
+peer a "$CLI" roster list 2>/dev/null | grep -qi peer-b && bad "the removed peer is still listed" || ok "the removed peer is gone from the roster"
+peer a "$CLI" send "$BID" "$ROOT/x.bin" >/dev/null 2>&1 && bad "sending to a removed peer was accepted" || ok "sending to a removed peer is refused"
+
+echo
 echo "== audit log is content-free =="
 aud=$(peer a "$CLI" activity --limit 60 2>/dev/null; peer b "$CLI" activity --limit 60 2>/dev/null)
 leak=""

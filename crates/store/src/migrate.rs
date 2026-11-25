@@ -60,6 +60,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "0010_remote_jobs",
         sql: include_str!("migrations/0010_remote_jobs.sql"),
     },
+    Migration {
+        version: 11,
+        name: "0011_roster_removed",
+        sql: include_str!("migrations/0011_roster_removed.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

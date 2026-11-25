@@ -58,9 +58,8 @@ impl SqliteStore {
     }
 
     fn display_name_for(&self, peer_id: &str) -> Result<String, StoreError> {
-        Ok(ferry_store::roster::get_peer(&self.conn, peer_id)
+        Ok(ferry_store::roster::display_name_even_if_removed(&self.conn, peer_id)
             .map_err(|e| StoreError(e.to_string()))?
-            .map(|p| p.display_name)
             .unwrap_or_else(|| peer_id.to_string()))
     }
 
@@ -498,9 +497,14 @@ impl Store for SqliteStore {
         let entries = signed.verify().map_err(|e| StoreError(e.to_string()))?;
         let peer_count = entries.len();
 
+        let own_fingerprint = self.local_identity.fingerprint();
         let mut added = 0;
         let mut skipped_existing = 0;
         for entry in entries {
+            if entry.peer_id.0 == own_fingerprint {
+                skipped_existing += 1;
+                continue;
+            }
             let exists = ferry_store::roster::get_peer(&self.conn, &entry.peer_id.0)
                 .map_err(|e| StoreError(e.to_string()))?
                 .is_some();
@@ -537,11 +541,23 @@ impl Store for SqliteStore {
     }
 
     fn add_paired_peer(&mut self, peer: &ferry_core::ports::NewRosterPeer) -> Result<(), StoreError> {
-        if ferry_store::roster::get_peer(&self.conn, &peer.peer_id)
+        if peer.peer_id == self.local_identity.fingerprint() {
+            return Err(StoreError("a machine cannot pair with itself".into()));
+        }
+        if let Some(existing) = ferry_store::roster::get_peer(&self.conn, &peer.peer_id)
             .map_err(|e| StoreError(e.to_string()))?
-            .is_some()
         {
-            return Err(StoreError(format!("already paired with {}", peer.peer_id)));
+            if existing.signing_key != peer.signing_key_hex || existing.sealing_key != peer.sealing_key {
+                return Err(StoreError(format!(
+                    "already paired with {} under different keys — remove it first",
+                    peer.peer_id
+                )));
+            }
+            ferry_store::roster::rename_peer(&self.conn, &peer.peer_id, &peer.display_name)
+                .map_err(|e| StoreError(e.to_string()))?;
+            ferry_store::audit::append(&self.conn, "local", "peer.paired", Some(&peer.peer_id), "repaired")
+                .map_err(|e| StoreError(e.to_string()))?;
+            return Ok(());
         }
         ferry_store::roster::insert_peer(
             &self.conn,
@@ -628,6 +644,25 @@ impl Store for SqliteStore {
             return Err(StoreError(format!("no such peer {peer_id}")));
         }
         ferry_store::roster::remove_peer(&self.conn, peer_id).map_err(|e| StoreError(e.to_string()))?;
+        for entry in ferry_store::outbox::list_for_peer(&self.conn, peer_id).map_err(|e| StoreError(e.to_string()))? {
+            ferry_store::outbox::remove(&self.conn, &entry.id).map_err(|e| StoreError(e.to_string()))?;
+            let current = ferry_store::outbound::get(&self.conn, &entry.item_id)
+                .map_err(|e| StoreError(e.to_string()))?
+                .map(|item| item.state);
+            let may_fail = current
+                .map(|state| ferry_core::state::TRANSFER_TRANSITIONS.validate(state, TransferState::Failed).is_ok())
+                .unwrap_or(false);
+            if may_fail {
+                ferry_store::outbound::set_state(&self.conn, &entry.item_id, TransferState::Failed)
+                    .map_err(|e| StoreError(e.to_string()))?;
+                let _ = ferry_store::outbound::set_last_error(&self.conn, &entry.item_id, "the peer was removed from the roster");
+                self.record_outbound_dropped(&entry.item_id, "local", "peer_removed")?;
+            }
+            self.discard_staged_source(&entry.item_id)?;
+        }
+        for item_id in ferry_store::receipts::list_for_peer(&self.conn, peer_id).map_err(|e| StoreError(e.to_string()))? {
+            ferry_store::receipts::remove(&self.conn, &item_id).map_err(|e| StoreError(e.to_string()))?;
+        }
         let _ = ferry_store::audit::append(&self.conn, "local", "peer.removed", Some(peer_id), "ok");
         Ok(())
     }
@@ -1575,7 +1610,7 @@ mod tests {
     }
 
     #[test]
-    fn add_paired_peer_persists_a_real_roster_row_and_rejects_a_duplicate() {
+    fn add_paired_peer_persists_one_real_roster_row_and_rejects_changed_keys() {
         use ferry_core::ports::{NewRosterPeer, Store};
 
         let conn = ferry_store::connection::open_in_memory().unwrap();
@@ -1594,8 +1629,9 @@ mod tests {
         assert_eq!(listed[0].peer_id, "aabbccdd");
         assert_eq!(listed[0].display_name, "phone");
 
-        let result = store.add_paired_peer(&peer);
-        assert!(result.is_err(), "pairing with an already-paired peer_id must be rejected");
+        store.add_paired_peer(&peer).expect("pairing again with identical keys is harmless");
+        let impostor = NewRosterPeer { signing_key_hex: hex::encode([8u8; 32]), ..peer.clone() };
+        assert!(store.add_paired_peer(&impostor).is_err(), "a known peer_id must not change keys");
         assert_eq!(store.list_roster_peers().unwrap().len(), 1);
 
         let audit = store.list_audit(50, None).unwrap();
