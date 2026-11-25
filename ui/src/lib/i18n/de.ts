@@ -327,7 +327,7 @@ export const de: Catalog = {
       "Gist veröffentlichen: legt eine verschlüsselte Kopie eines Elements als privates Gist auf GitHub ab. GitHub erfährt dabei den öffentlichen Schlüssel des Empfängers und die Größe des Chiffretexts; „Burn-after-read“ kann für dieses Element nicht mehr garantiert werden, sobald es diesen Rechner verlässt.",
     remoteFeaturesConfirmBody3:
       "Team-Roster abrufen: liest eine signierte Roster-Datei aus einem von Ihnen gewählten Repository zur Vorschau und zum Import.",
-    remoteFeaturesConfirmBody4: "Sie können dies jederzeit wieder deaktivieren; in beiden Fällen ist ein Neustart des Daemons erforderlich.",
+    remoteFeaturesConfirmBody4: "Sie können dies jederzeit wieder deaktivieren; die Änderung wirkt in beiden Fällen sofort.",
     processControl: "Prozesssteuerung",
     processControlHint:
       "Manuelle Eingriffe in den Daemon-Lebenszyklus. Während aktiver Transfers mit Vorsicht verwenden.",

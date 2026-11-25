@@ -324,7 +324,7 @@ export const en = {
       "Publish gist: puts an encrypted copy of one item on GitHub as a private gist. GitHub then learns the recipient's public key and the ciphertext size, and burn-after-read can no longer be honoured for that item once it leaves this machine.",
     remoteFeaturesConfirmBody3:
       "Fetch team roster: reads a signed roster file from a repository you choose, to preview and import.",
-    remoteFeaturesConfirmBody4: "You can disable this again at any time; it takes a daemon restart to apply either way.",
+    remoteFeaturesConfirmBody4: "You can disable this again at any time; it takes effect immediately either way.",
     processControl: "Process control",
     processControlHint:
       "Manual overrides for the daemon lifecycle. Use with care during active transfers.",

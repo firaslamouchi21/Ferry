@@ -327,7 +327,7 @@ export const fr: Catalog = {
       "Publier un gist : place une copie chiffrée d'un élément sur GitHub sous forme de gist privé. GitHub apprend alors la clé publique du destinataire et la taille du texte chiffré, et la destruction après lecture ne peut plus être garantie pour cet élément une fois qu'il a quitté cette machine.",
     remoteFeaturesConfirmBody3:
       "Récupérer un roster d'équipe : lit un fichier de roster signé depuis un dépôt de votre choix, pour aperçu et import.",
-    remoteFeaturesConfirmBody4: "Vous pouvez désactiver ceci à tout moment ; un redémarrage du démon est nécessaire dans les deux cas.",
+    remoteFeaturesConfirmBody4: "Vous pouvez désactiver ceci à tout moment ; le changement est appliqué immédiatement dans les deux cas.",
     processControl: "Contrôle du processus",
     processControlHint:
       "Actions manuelles sur le cycle de vie du démon. À utiliser avec prudence pendant des transferts actifs.",

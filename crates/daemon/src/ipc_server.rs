@@ -141,7 +141,7 @@ fn handle_connection(
     }
 
     if let IpcRequest::SetRemoteFeaturesEnabled { enabled } = envelope.request {
-        let response = handle_set_remote_features_enabled(&envelope.request_id, enabled, data_dir);
+        let response = handle_set_remote_features_enabled(&envelope.request_id, enabled, data_dir, provider);
         write_response(&mut stream, &response);
         return false;
     }
@@ -370,9 +370,17 @@ fn write_remote_features_enabled(data_dir: &Path, enabled: bool) -> Result<(), S
     std::fs::write(&config_path, serialized).map_err(|e| format!("failed to write {}: {e}", config_path.display()))
 }
 
-fn handle_set_remote_features_enabled(request_id: &RequestId, enabled: bool, data_dir: &Path) -> IpcResponse {
+fn handle_set_remote_features_enabled(
+    request_id: &RequestId,
+    enabled: bool,
+    data_dir: &Path,
+    provider: &ProviderRegistry,
+) -> IpcResponse {
     match write_remote_features_enabled(data_dir, enabled) {
-        Ok(()) => ok(request_id, IpcResult::Ack),
+        Ok(()) => {
+            provider.set_enabled(enabled);
+            ok(request_id, IpcResult::Ack)
+        }
         Err(message) => provider_err(request_id, ErrorCode::Internal, message),
     }
 }
@@ -674,6 +682,30 @@ mod tests {
         send_request(&socket_path, IpcRequest::Quit, IPC_PROTOCOL_VERSION);
         server_thread.join().unwrap();
         let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn turning_the_github_features_on_applies_to_the_running_daemon_without_a_restart() {
+        let data_dir = std::env::temp_dir().join(format!("ferry-toggle-{}", uuid::Uuid::now_v7()));
+        let provider = crate::provider::ProviderRegistry::new(
+            ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"),
+            false,
+            None,
+        );
+        let worker_view = crate::provider::ProviderRegistry::new(
+            ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"),
+            true,
+            None,
+        )
+        .sharing_flag(provider.enabled_flag());
+        let id = RequestId("r".into());
+
+        assert!(!provider.is_enabled());
+        handle_set_remote_features_enabled(&id, true, &data_dir, &provider);
+        assert!(provider.is_enabled() && worker_view.is_enabled());
+        handle_set_remote_features_enabled(&id, false, &data_dir, &provider);
+        assert!(!provider.is_enabled() && !worker_view.is_enabled(), "the worker must stop honouring jobs too");
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
