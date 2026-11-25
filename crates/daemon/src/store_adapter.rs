@@ -58,9 +58,8 @@ impl SqliteStore {
     }
 
     fn display_name_for(&self, peer_id: &str) -> Result<String, StoreError> {
-        Ok(ferry_store::roster::get_peer(&self.conn, peer_id)
+        Ok(ferry_store::roster::display_name_even_if_removed(&self.conn, peer_id)
             .map_err(|e| StoreError(e.to_string()))?
-            .map(|p| p.display_name)
             .unwrap_or_else(|| peer_id.to_string()))
     }
 
@@ -204,11 +203,61 @@ impl Store for SqliteStore {
                 hasher.update(plaintext.expose());
             }
         } else {
-            let bytes = ferry_store::payload::read_all(&self.payload_dir, item_id)
+            ferry_store::payload::read_chunks(&self.payload_dir, item_id, &mut |chunk| hasher.update(chunk))
                 .map_err(|e| StoreError(e.to_string()))?;
-            hasher.update(&bytes);
         }
         Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn inbound_origin(&self, item_id: &str) -> Result<Option<ferry_core::ports::InboundOrigin>, StoreError> {
+        let found = ferry_store::inbox::get(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        Ok(found.map(|item| ferry_core::ports::InboundOrigin {
+            peer_id: item.peer_id,
+            hash: item.hash,
+            size_bytes: item.size_bytes.max(0) as u64,
+            kind: item.kind,
+        }))
+    }
+
+    fn outbound_recipient(&self, item_id: &str) -> Result<Option<String>, StoreError> {
+        let found = ferry_store::outbound::get(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        Ok(found.map(|item| item.peer_id))
+    }
+
+    fn is_inbound_reopenable(&self, item_id: &str) -> Result<bool, StoreError> {
+        let found = ferry_store::inbox::get(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        Ok(found.map(|item| !item.is_burn_after_read).unwrap_or(false))
+    }
+
+    fn purge_inbound_payload(&mut self, item_id: &str) -> Result<(), StoreError> {
+        ferry_store::inbox::clear_wrapped_dek(&self.conn, item_id).map_err(|e| StoreError(e.to_string()))?;
+        ferry_store::payload::delete(&self.payload_dir, item_id).map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn reset_inbound_payload(&mut self, item_id: &str) -> Result<(), StoreError> {
+        ferry_store::payload::delete(&self.payload_dir, item_id).map_err(|e| StoreError(e.to_string()))?;
+        ferry_store::inbox::set_bytes_received_count(&self.conn, item_id, 0).map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn copy_inbound_file_to(&self, item_id: &str, destination: &std::path::Path) -> Result<u64, StoreError> {
+        let item = ferry_store::inbox::get(&self.conn, item_id)
+            .map_err(|e| StoreError(e.to_string()))?
+            .ok_or_else(|| StoreError("no such inbound item".into()))?;
+        if item.kind != ItemKind::File {
+            return Err(StoreError("only files can be saved to disk".into()));
+        }
+        let hasher = std::cell::RefCell::new(Sha256::new());
+        ferry_store::payload::copy_verified(
+            &self.payload_dir,
+            item_id,
+            destination,
+            &mut |chunk| hasher.borrow_mut().update(chunk),
+            &mut |written| {
+                written == item.size_bytes.max(0) as u64
+                    && hex::encode(hasher.borrow().clone().finalize()) == item.hash
+            },
+        )
+        .map_err(|e| StoreError(e.to_string()))
     }
 
     fn finalize_inbound_delivered(&mut self, item_id: &str) -> Result<(), StoreError> {
@@ -317,6 +366,10 @@ impl Store for SqliteStore {
 
     fn record_outbox_attempt(&mut self, outbox_id: &str) -> Result<(), StoreError> {
         ferry_store::outbox::record_attempt(&self.conn, outbox_id).map_err(|e| StoreError(e.to_string()))
+    }
+
+    fn reset_outbox_backoff(&mut self, outbox_id: &str) -> Result<(), StoreError> {
+        ferry_store::outbox::reset_backoff(&self.conn, outbox_id).map_err(|e| StoreError(e.to_string()))
     }
 
     fn remove_outbox_entry(&mut self, outbox_id: &str) -> Result<(), StoreError> {
@@ -438,7 +491,16 @@ impl Store for SqliteStore {
             }
             Ok(plaintext)
         } else {
-            ferry_store::payload::read_all(&self.payload_dir, item_id).map_err(|e| StoreError(e.to_string()))
+            let bytes = ferry_store::payload::read_all(&self.payload_dir, item_id)
+                .map_err(|e| StoreError(e.to_string()))?;
+            if bytes.len() as i64 != item.size_bytes {
+                return Err(StoreError(format!(
+                    "the stored payload is incomplete: {} of {} bytes present",
+                    bytes.len(),
+                    item.size_bytes
+                )));
+            }
+            Ok(bytes)
         }
     }
 
@@ -498,9 +560,14 @@ impl Store for SqliteStore {
         let entries = signed.verify().map_err(|e| StoreError(e.to_string()))?;
         let peer_count = entries.len();
 
+        let own_fingerprint = self.local_identity.fingerprint();
         let mut added = 0;
         let mut skipped_existing = 0;
         for entry in entries {
+            if entry.peer_id.0 == own_fingerprint {
+                skipped_existing += 1;
+                continue;
+            }
             let exists = ferry_store::roster::get_peer(&self.conn, &entry.peer_id.0)
                 .map_err(|e| StoreError(e.to_string()))?
                 .is_some();
@@ -537,11 +604,23 @@ impl Store for SqliteStore {
     }
 
     fn add_paired_peer(&mut self, peer: &ferry_core::ports::NewRosterPeer) -> Result<(), StoreError> {
-        if ferry_store::roster::get_peer(&self.conn, &peer.peer_id)
+        if peer.peer_id == self.local_identity.fingerprint() {
+            return Err(StoreError("a machine cannot pair with itself".into()));
+        }
+        if let Some(existing) = ferry_store::roster::get_peer(&self.conn, &peer.peer_id)
             .map_err(|e| StoreError(e.to_string()))?
-            .is_some()
         {
-            return Err(StoreError(format!("already paired with {}", peer.peer_id)));
+            if existing.signing_key != peer.signing_key_hex || existing.sealing_key != peer.sealing_key {
+                return Err(StoreError(format!(
+                    "already paired with {} under different keys — remove it first",
+                    peer.peer_id
+                )));
+            }
+            ferry_store::roster::rename_peer(&self.conn, &peer.peer_id, &peer.display_name)
+                .map_err(|e| StoreError(e.to_string()))?;
+            ferry_store::audit::append(&self.conn, "local", "peer.paired", Some(&peer.peer_id), "repaired")
+                .map_err(|e| StoreError(e.to_string()))?;
+            return Ok(());
         }
         ferry_store::roster::insert_peer(
             &self.conn,
@@ -628,6 +707,25 @@ impl Store for SqliteStore {
             return Err(StoreError(format!("no such peer {peer_id}")));
         }
         ferry_store::roster::remove_peer(&self.conn, peer_id).map_err(|e| StoreError(e.to_string()))?;
+        for entry in ferry_store::outbox::list_for_peer(&self.conn, peer_id).map_err(|e| StoreError(e.to_string()))? {
+            ferry_store::outbox::remove(&self.conn, &entry.id).map_err(|e| StoreError(e.to_string()))?;
+            let current = ferry_store::outbound::get(&self.conn, &entry.item_id)
+                .map_err(|e| StoreError(e.to_string()))?
+                .map(|item| item.state);
+            let may_fail = current
+                .map(|state| ferry_core::state::TRANSFER_TRANSITIONS.validate(state, TransferState::Failed).is_ok())
+                .unwrap_or(false);
+            if may_fail {
+                ferry_store::outbound::set_state(&self.conn, &entry.item_id, TransferState::Failed)
+                    .map_err(|e| StoreError(e.to_string()))?;
+                let _ = ferry_store::outbound::set_last_error(&self.conn, &entry.item_id, "the peer was removed from the roster");
+                self.record_outbound_dropped(&entry.item_id, "local", "peer_removed")?;
+            }
+            self.discard_staged_source(&entry.item_id)?;
+        }
+        for item_id in ferry_store::receipts::list_for_peer(&self.conn, peer_id).map_err(|e| StoreError(e.to_string()))? {
+            ferry_store::receipts::remove(&self.conn, &item_id).map_err(|e| StoreError(e.to_string()))?;
+        }
         let _ = ferry_store::audit::append(&self.conn, "local", "peer.removed", Some(peer_id), "ok");
         Ok(())
     }
@@ -652,19 +750,11 @@ impl Store for SqliteStore {
     }
 
     fn retry_outbound(&mut self, item_id: &str, _actor: &str) -> Result<(), StoreError> {
-        let item = ferry_store::outbound::get(&self.conn, item_id)
+        ferry_store::outbound::get(&self.conn, item_id)
             .map_err(|e| StoreError(e.to_string()))?
             .ok_or_else(|| StoreError(format!("no outbound item {item_id}")))?;
-        if ferry_store::outbox::get_for_item(&self.conn, item_id)
-            .map_err(|e| StoreError(e.to_string()))?
-            .is_none()
-        {
-            ferry_store::outbox::enqueue(&self.conn, item_id, &item.peer_id, None)
-                .map_err(|e| StoreError(e.to_string()))?;
-        }
-        ferry_store::outbound::set_state(&self.conn, item_id, TransferState::Queued)
+        ferry_store::outbound::set_last_error(&self.conn, item_id, "sent again as a new transfer")
             .map_err(|e| StoreError(e.to_string()))?;
-        let _ = ferry_store::outbound::set_last_error(&self.conn, item_id, "");
         let _ = ferry_store::audit::append(&self.conn, "local", "outbox.retry", Some(item_id), "ok");
         Ok(())
     }
@@ -882,7 +972,7 @@ mod tests {
     }
 
     #[test]
-    fn abort_outbound_drops_the_outbox_entry_and_retry_requeues_it() {
+    fn abort_outbound_drops_the_outbox_entry_and_retry_never_revives_a_terminal_item() {
         let mut store = store_with_peer("peer-b", "bob");
         let clock = ferry_core::expiry::ExpiryClock::new();
         let id = enqueue_send(&mut store, &clock, &sample_item("peer-b"), "local").unwrap();
@@ -892,8 +982,35 @@ mod tests {
         assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Failed));
 
         store.retry_outbound(&id, "local").unwrap();
-        assert_eq!(ferry_store::outbox::list_for_peer(&store.conn, "peer-b").unwrap().len(), 1);
-        assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Queued));
+        assert!(ferry_store::outbox::list_for_peer(&store.conn, "peer-b").unwrap().is_empty());
+        assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Failed));
+    }
+
+    #[test]
+    fn a_peer_with_transfer_history_can_be_removed_and_paired_again() {
+        let mut store = store_with_peer("peer-b", "bob");
+        let clock = ferry_core::expiry::ExpiryClock::new();
+        let id = enqueue_send(&mut store, &clock, &sample_item("peer-b"), "local").unwrap();
+
+        store.remove_peer("peer-b").unwrap();
+        assert!(store.list_roster_peers().unwrap().is_empty());
+        assert!(!store.is_peer_authorized("peer-b").unwrap());
+        assert_eq!(store.get_outbound_state(&id).unwrap(), Some(TransferState::Failed));
+        assert!(ferry_store::outbox::list_for_peer(&store.conn, "peer-b").unwrap().is_empty());
+        assert_eq!(store.list_sent_items().unwrap()[0].peer_display_name, "bob");
+
+        let again = ferry_core::ports::NewRosterPeer {
+            peer_id: "peer-b".into(),
+            display_name: "bob-laptop".into(),
+            signing_key_hex: "sk".into(),
+            sealing_key: "xk".into(),
+        };
+        store.add_paired_peer(&again).unwrap();
+        store.add_paired_peer(&again).expect("re-pairing with identical keys must be idempotent");
+        assert_eq!(store.list_roster_peers().unwrap()[0].display_name, "bob-laptop");
+
+        let impostor = ferry_core::ports::NewRosterPeer { sealing_key: "other".into(), ..again };
+        assert!(store.add_paired_peer(&impostor).is_err(), "a known peer id must never silently change keys");
     }
 
     #[test]
@@ -1072,6 +1189,16 @@ mod tests {
         let sender_thread = std::thread::spawn(move || {
             send_item(&mut sender_channel, &mut sender_store, &sender_item_id, &item, Cursor::new(sender_payload))
                 .unwrap();
+            ferry_core::transfer::receive_next_inbound(
+                &mut sender_channel,
+                &mut sender_store,
+                &ferry_core::expiry::ExpiryClock::new(),
+                "peer-b",
+                "local",
+                true,
+                &mut |_, _, _| {},
+            )
+            .unwrap();
             (sender_channel, sender_store)
         });
 
@@ -1227,7 +1354,7 @@ mod tests {
                 peer_id: "peer-b".into(),
                 kind: ItemKind::File,
                 name: "restart-test.bin".into(),
-                size_bytes: 24,
+                size_bytes: 23,
                 hash: expected_hash.clone(),
                 ttl_secs: 600,
                 is_burn_after_read: false,
@@ -1369,7 +1496,7 @@ mod tests {
         let sender_thread = std::thread::spawn(move || {
             send_item(&mut sender_channel, &mut sender_store, &sender_item_id, &item, Cursor::new(sender_payload))
                 .unwrap();
-            sender_store
+            (sender_channel, sender_store)
         });
 
         receive_item(&mut receiver_channel, &mut receiver_store, &clock, "peer-a", "local").unwrap();
@@ -1390,8 +1517,8 @@ mod tests {
         let decrypted = receiver_store.read_inbound_plaintext(&item_id).unwrap();
         assert_eq!(decrypted, payload, "sealed local storage must be readable fully offline before burn");
 
+        let _sender = sender_thread.join().unwrap();
         open_item(&mut receiver_channel, &mut receiver_store, &clock, &item_id).unwrap();
-        sender_thread.join().unwrap();
 
         let inbound_after_burn = ferry_store::inbox::get(&receiver_store.conn, &item_id).unwrap().unwrap();
         assert!(
@@ -1575,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn add_paired_peer_persists_a_real_roster_row_and_rejects_a_duplicate() {
+    fn add_paired_peer_persists_one_real_roster_row_and_rejects_changed_keys() {
         use ferry_core::ports::{NewRosterPeer, Store};
 
         let conn = ferry_store::connection::open_in_memory().unwrap();
@@ -1594,8 +1721,9 @@ mod tests {
         assert_eq!(listed[0].peer_id, "aabbccdd");
         assert_eq!(listed[0].display_name, "phone");
 
-        let result = store.add_paired_peer(&peer);
-        assert!(result.is_err(), "pairing with an already-paired peer_id must be rejected");
+        store.add_paired_peer(&peer).expect("pairing again with identical keys is harmless");
+        let impostor = NewRosterPeer { signing_key_hex: hex::encode([8u8; 32]), ..peer.clone() };
+        assert!(store.add_paired_peer(&impostor).is_err(), "a known peer_id must not change keys");
         assert_eq!(store.list_roster_peers().unwrap().len(), 1);
 
         let audit = store.list_audit(50, None).unwrap();
@@ -1694,5 +1822,171 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn saving_a_received_file_writes_it_whole_marks_it_opened_and_never_loses_it_on_failure() {
+        use ferry_core::ipc::{handle, RuntimeStatus};
+        use ferry_proto::ipc::{IpcOutcome, IpcRequest, IpcResult, RequestId, IPC_PROTOCOL_VERSION};
+
+        for is_burn_after_read in [false, true] {
+            let mut store = store_with_peer("peer-a", "alice");
+            let payload: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
+            let offer = Offer {
+                item_id: ferry_proto::ids::ItemId("item-1".into()),
+                kind: ItemKind::File,
+                name: "photo.bin".into(),
+                size_bytes: payload.len() as u64,
+                hash: hex::encode(Sha256::digest(&payload)),
+                ttl_secs: 600,
+                burn_after_read: is_burn_after_read,
+                notify_on_open: false,
+            };
+            store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+            store.append_inbound_chunk("item-1", 0, &payload).unwrap();
+            for state in [TransferState::Accepted, TransferState::Transferring] {
+                store.set_inbound_state("item-1", state).unwrap();
+            }
+            store.finalize_inbound_delivered("item-1").unwrap();
+
+            let clock = ferry_core::expiry::ExpiryClock::new();
+            let mut source = crate::file_source::FilePathSource::new(ferry_crypto::identity::Identity::generate());
+            let mut save = |store: &mut SqliteStore, destination: &std::path::Path| {
+                handle(
+                    store,
+                    &clock,
+                    &mut source,
+                    &RuntimeStatus::default(),
+                    RequestId("r".into()),
+                    IPC_PROTOCOL_VERSION,
+                    IpcRequest::SaveTo {
+                        item_id: "item-1".into(),
+                        destination: destination.to_string_lossy().into_owned(),
+                    },
+                )
+                .outcome
+            };
+
+            let out = temp_payload_dir();
+            let unwritable = out.join("no-such-folder").join("photo.bin");
+            assert!(matches!(save(&mut store, &unwritable), IpcOutcome::Err { .. }));
+            assert_eq!(
+                store.get_inbound_state("item-1").unwrap(),
+                Some(TransferState::Delivered),
+                "a failed save must leave the item openable, burn or not"
+            );
+            assert_eq!(store.read_inbound_plaintext("item-1").unwrap(), payload);
+            assert!(matches!(save(&mut store, std::path::Path::new("relative.bin")), IpcOutcome::Err { .. }));
+
+            std::fs::create_dir_all(&out).unwrap();
+            let target = out.join("photo.bin");
+            assert!(matches!(
+                save(&mut store, &target),
+                IpcOutcome::Ok { value: IpcResult::Saved { size_bytes } } if size_bytes == payload.len() as u64
+            ));
+            assert_eq!(std::fs::read(&target).unwrap(), payload);
+            assert_eq!(store.get_inbound_state("item-1").unwrap(), Some(TransferState::Opened));
+
+            let second = save(&mut store, &out.join("again.bin"));
+            assert_eq!(
+                matches!(second, IpcOutcome::Ok { .. }),
+                !is_burn_after_read,
+                "an ordinary file can be saved again, a burned one cannot"
+            );
+            std::fs::remove_dir_all(&out).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_received_file_whose_payload_vanished_is_reported_damaged_not_saved_empty() {
+        let mut store = store_with_peer("peer-a", "alice");
+        let offer = Offer {
+            item_id: ferry_proto::ids::ItemId("item-1".into()),
+            kind: ItemKind::File,
+            name: "gone.txt".into(),
+            size_bytes: 5,
+            hash: hex::encode(Sha256::digest(b"hello")),
+            ttl_secs: 600,
+            burn_after_read: false,
+            notify_on_open: false,
+        };
+        store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+        let out = temp_payload_dir();
+        std::fs::create_dir_all(&out).unwrap();
+        assert!(store.copy_inbound_file_to("item-1", &out.join("gone.txt")).is_err());
+        assert!(store.read_inbound_plaintext("item-1").is_err());
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+        std::fs::remove_dir_all(&out).unwrap();
+    }
+
+    #[test]
+    fn a_secret_is_never_written_to_disk_by_a_save_request() {
+        let mut store = store_with_peer("peer-a", "alice");
+        let offer = Offer {
+            item_id: ferry_proto::ids::ItemId("item-1".into()),
+            kind: ItemKind::Secret,
+            name: ".env".into(),
+            size_bytes: 1,
+            hash: hex::encode(Sha256::digest(b"x")),
+            ttl_secs: 600,
+            burn_after_read: false,
+            notify_on_open: false,
+        };
+        store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+        let target = std::env::temp_dir().join(format!("ferry-secret-{}", uuid::Uuid::now_v7()));
+        assert!(store.copy_inbound_file_to("item-1", &target).is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn expiring_an_item_destroys_its_key_and_payload() {
+        let mut store = store_with_peer("peer-a", "alice");
+        let offer = Offer {
+            item_id: ferry_proto::ids::ItemId("item-1".into()),
+            kind: ItemKind::Secret,
+            name: ".env".into(),
+            size_bytes: 1,
+            hash: hex::encode(Sha256::digest(b"x")),
+            ttl_secs: 0,
+            burn_after_read: false,
+            notify_on_open: false,
+        };
+        store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+        store.append_inbound_chunk("item-1", 0, b"x").unwrap();
+        store.finalize_inbound_delivered("item-1").unwrap();
+        let clock = ferry_core::expiry::ExpiryClock::new();
+        store.set_inbound_expiry("item-1", &clock.compute_deadline(0)).unwrap();
+
+        assert!(ferry_core::transfer::expire_if_due(&mut store, &clock, "item-1").unwrap());
+        assert_eq!(store.get_inbound_state("item-1").unwrap(), Some(TransferState::Expired));
+        assert!(store.read_inbound_plaintext("item-1").is_err());
+        assert!(!store.payload_dir.join("item-1.bin").exists());
+    }
+
+    #[test]
+    fn an_opened_ordinary_file_is_purged_from_disk_once_its_ttl_passes_but_a_live_one_is_kept() {
+        let mut store = store_with_peer("peer-a", "alice");
+        let clock = ferry_core::expiry::ExpiryClock::new();
+        for (id, ttl) in [("item-live", 600u32), ("item-old", 0)] {
+            let offer = Offer {
+                item_id: ferry_proto::ids::ItemId(id.into()),
+                kind: ItemKind::File,
+                name: "f.txt".into(),
+                size_bytes: 1,
+                hash: hex::encode(Sha256::digest(b"x")),
+                ttl_secs: ttl,
+                burn_after_read: false,
+                notify_on_open: false,
+            };
+            store.create_inbound(&offer, "peer-a", "peer-a").unwrap();
+            store.append_inbound_chunk(id, 0, b"x").unwrap();
+            store.finalize_inbound_delivered(id).unwrap();
+            store.set_inbound_expiry(id, &clock.compute_deadline(ttl)).unwrap();
+            store.mark_inbound_opened(id).unwrap();
+        }
+        ferry_core::ipc::expire_due_inbox_items(&mut store, &clock).unwrap();
+        assert!(store.payload_dir.join("item-live.bin").exists());
+        assert!(!store.payload_dir.join("item-old.bin").exists());
+        assert_eq!(store.get_inbound_state("item-old").unwrap(), Some(TransferState::Opened));
     }
 }

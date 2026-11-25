@@ -85,6 +85,14 @@ pub fn record_attempt(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+pub fn reset_backoff(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE outbox_entries SET attempts = 1, last_attempted_at_millis = ?2 WHERE id = ?1",
+        params![id, now_millis()],
+    )?;
+    Ok(())
+}
+
 pub fn remove(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM outbox_entries WHERE id = ?1", params![id])?;
     Ok(())

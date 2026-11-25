@@ -2,11 +2,18 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use ferry_core::config::{Config, ConfigError, RawConfig};
 use ferry_daemon::store_adapter;
 use fs2::FileExt;
 use thiserror::Error;
+
+const IPC_WORKERS: usize = 4;
+const EXPIRY_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+const PAIRING_SAVE_INTERVAL: Duration = Duration::from_secs(2);
+const P2P_REBIND_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 enum BootError {
@@ -129,25 +136,10 @@ fn boot() -> Result<(), BootError> {
     let store_path = config.data_dir.join("ferry.sqlite");
     let payload_dir = config.data_dir.join("payloads");
 
-    let mut p2p_store = open_store(&store_path, &payload_dir, &identity)?;
-    let p2p_roster_conn = ferry_store::connection::open(&store_path).map_err(|source| BootError::OpenStore {
-        path: store_path.clone(),
-        source,
-    })?;
-    let mut discovery_store = open_store(&store_path, &payload_dir, &identity)?;
-    let discovery_roster_conn = ferry_store::connection::open(&store_path).map_err(|source| BootError::OpenStore {
-        path: store_path.clone(),
-        source,
-    })?;
-    let discovery_source_conn = ferry_store::connection::open(&store_path).map_err(|source| BootError::OpenStore {
-        path: store_path.clone(),
-        source,
-    })?;
-
     let socket_path = ferry_core::config::ipc_socket_path(&config.data_dir);
     let event_bus = std::sync::Arc::new(ferry_daemon::event_bus::EventBus::new());
     let presence = std::sync::Arc::new(ferry_daemon::presence::Presence::new());
-    let mut ipc_store = open_store(&store_path, &payload_dir, &identity)?.with_presence(presence.clone());
+    let ipc_store = open_store(&store_path, &payload_dir, &identity)?.with_presence(presence.clone());
 
     let socket_for_signal = socket_path.clone();
     if let Err(err) = ctrlc::set_handler(move || {
@@ -165,68 +157,58 @@ fn boot() -> Result<(), BootError> {
     let fingerprint = ipc_store.identity().fingerprint();
     let auto_accept = config.auto_accept_from_roster;
 
-    let transport_ok = match ferry_daemon::p2p::bind(config.listen_port) {
-        Ok(p2p_listener) => {
-            let event_bus_p2p = event_bus.clone();
-            std::thread::spawn(move || {
-                let peer_id_for =
-                    move |remote: &[u8; 32]| ferry_daemon::roster_authorizer::peer_id_for_static(&p2p_roster_conn, remote);
-                let emit = |event| event_bus_p2p.emit(event);
-                if let Err(err) = ferry_daemon::p2p::serve_incoming(
-                    &p2p_listener,
-                    &local_keys,
-                    &mut p2p_store,
-                    &clock,
-                    peer_id_for,
-                    auto_accept,
-                    &emit,
-                ) {
-                    eprintln!("ferry-daemon: P2P listener stopped: {err}");
-                }
-            });
-            true
+    let live = std::sync::Arc::new(ferry_core::ipc::LiveHealth::default());
+    let open_worker_store = {
+        let (store_path, payload_dir, identity) = (store_path.clone(), payload_dir.clone(), identity.clone());
+        move || {
+            let store = open_store(&store_path, &payload_dir, &identity).map_err(|e| e.to_string())?;
+            let source_conn = ferry_store::connection::open(&store_path).map_err(|e| e.to_string())?;
+            let source = ferry_daemon::file_source::StoreBackedSource::new(source_conn, identity.clone());
+            Ok((store, source))
         }
-        Err(err) => {
-            eprintln!("ferry-daemon: could not start the P2P listener: {err}");
-            false
-        }
+    };
+    let link = ferry_daemon::discovery::PeerLink {
+        local_keys,
+        clock,
+        presence: presence.clone(),
+        emit: {
+            let event_bus = event_bus.clone();
+            std::sync::Arc::new(move |event| event_bus.emit(event))
+        },
+        open_store: std::sync::Arc::new(open_worker_store),
     };
 
-    let discovery_ok = match ferry_net::discovery::Discovery::new() {
+    match ferry_daemon::p2p::bind(config.listen_port) {
+        Ok(listener) => {
+            live.transport_ok.store(true, Ordering::Relaxed);
+            spawn_p2p_listener(Some(listener), config.listen_port, link.clone(), auto_accept, live.clone());
+        }
+        Err(err) => {
+            eprintln!("ferry-daemon: could not start the P2P listener, will keep retrying: {err}");
+            spawn_p2p_listener(None, config.listen_port, link.clone(), auto_accept, live.clone());
+        }
+    }
+
+    match ferry_net::discovery::Discovery::new() {
         Ok(discovery) => match discovery.advertise(&fingerprint, &fingerprint, ferry_proto::envelope::PROTOCOL_VERSION, config.listen_port) {
             Ok(()) => {
-                let event_bus_discovery = event_bus.clone();
-                let presence_discovery = presence.clone();
-                let discovery_identity = ipc_store.identity().clone();
+                live.discovery_ok.store(true, Ordering::Relaxed);
+                let directory = ferry_daemon::discovery::PeerDirectory::default();
+                let (presence_link, presence_directory) = (link.clone(), directory.clone());
+                std::thread::spawn(move || ferry_daemon::discovery::run_presence_loop(&presence_link, &presence_directory));
+                let (discovery_link, discovery_live) = (link.clone(), live.clone());
                 std::thread::spawn(move || {
-                    let mut source = ferry_daemon::file_source::StoreBackedSource::new(discovery_source_conn, discovery_identity);
-                    let roster_lookup = move |peer_id: &str| {
-                        ferry_daemon::roster_authorizer::sealing_key_for_peer_id(&discovery_roster_conn, peer_id)
-                    };
-                    let emit = |event| event_bus_discovery.emit(event);
-                    ferry_daemon::discovery::run_reappearance_loop(
-                        &discovery,
-                        &local_keys,
-                        &mut discovery_store,
-                        &clock,
-                        &mut source,
-                        roster_lookup,
-                        &emit,
-                        &presence_discovery,
-                    );
+                    ferry_daemon::discovery::run_reappearance_loop(&discovery, &discovery_link, &directory);
+                    discovery_live.discovery_ok.store(false, Ordering::Relaxed);
+                    eprintln!("ferry-daemon: peer discovery stopped");
                 });
-                true
             }
-            Err(err) => {
-                eprintln!("ferry-daemon: mDNS advertise failed: {err}");
-                false
-            }
+            Err(err) => eprintln!("ferry-daemon: mDNS advertise failed: {err}"),
         },
-        Err(err) => {
-            eprintln!("ferry-daemon: mDNS daemon failed to start: {err}");
-            false
-        }
-    };
+        Err(err) => eprintln!("ferry-daemon: mDNS daemon failed to start: {err}"),
+    }
+    let transport_ok = live.transport_ok.load(Ordering::Relaxed);
+    let discovery_ok = live.discovery_ok.load(Ordering::Relaxed);
 
     let display_name = read_hostname().unwrap_or_else(|| "this device".to_string());
     let runtime = ferry_core::ipc::RuntimeStatus {
@@ -241,6 +223,8 @@ fn boot() -> Result<(), BootError> {
             data_dir: config.data_dir.display().to_string(),
             auto_accept_from_roster: config.auto_accept_from_roster,
         },
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
+        live: Some(live.clone()),
     };
 
     println!(
@@ -252,8 +236,36 @@ fn boot() -> Result<(), BootError> {
     );
     println!("transport_ok={transport_ok} discovery_ok={discovery_ok}");
 
-    let mut ipc_source = ferry_daemon::file_source::FilePathSource::new(ipc_store.identity().clone());
-    let pairing = ferry_daemon::pairing::PairingRegistry::new(ipc_store.identity().clone());
+    {
+        let (open_store, clock) = (link.open_store.clone(), clock);
+        std::thread::spawn(move || loop {
+            match open_store() {
+                Ok((mut store, _)) => loop {
+                    if let Err(err) = ferry_core::ipc::expire_due_inbox_items(&mut store, &clock) {
+                        eprintln!("ferry-daemon: expiry sweep failed: {err}");
+                    }
+                    std::thread::sleep(EXPIRY_SWEEP_INTERVAL);
+                },
+                Err(err) => {
+                    eprintln!("ferry-daemon: expiry sweep could not open the store: {err}");
+                    std::thread::sleep(EXPIRY_SWEEP_INTERVAL);
+                }
+            }
+        });
+    }
+    let pairing = std::sync::Arc::new(ferry_daemon::pairing::PairingRegistry::new(ipc_store.identity().clone()));
+    let mut pairing_store = open_store(&store_path, &payload_dir, &identity)?;
+    let (pairing_keeper, pairing_bus) = (pairing.clone(), event_bus.clone());
+    std::thread::spawn(move || loop {
+        use ferry_core::ports::Store;
+        if pairing_keeper.persist_pending(&mut |peer| pairing_store.add_paired_peer(peer).map_err(|e| e.to_string())) {
+            pairing_bus.emit(ferry_proto::ipc::IpcEvent::Changed {
+                resource: ferry_proto::ipc::IpcResource::Roster,
+                id: None,
+            });
+        }
+        std::thread::sleep(PAIRING_SAVE_INTERVAL);
+    });
 
     let token_store_for = |cfg: &ferry_core::config::Config| match cfg.provider_token_file.as_deref() {
         Some(passphrase_file) => {
@@ -268,9 +280,19 @@ fn boot() -> Result<(), BootError> {
         None => ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.provider", "github"),
     };
 
-    if config.remote_features_enabled {
+    let provider = ferry_daemon::provider::ProviderRegistry::new(
+        token_store_for(&config),
+        config.remote_features_enabled,
+        config.provider_github_client_id.clone(),
+    );
+    {
         let worker_store = open_store(&store_path, &payload_dir, &identity)?;
-        let worker_provider = ferry_daemon::provider::ProviderRegistry::new(token_store_for(&config), true, config.provider_github_client_id.clone());
+        let worker_provider = ferry_daemon::provider::ProviderRegistry::new(
+            token_store_for(&config),
+            true,
+            config.provider_github_client_id.clone(),
+        )
+        .sharing_flag(provider.enabled_flag());
         let event_bus_worker = event_bus.clone();
         std::thread::spawn(move || {
             let emit = |event| event_bus_worker.emit(event);
@@ -278,23 +300,52 @@ fn boot() -> Result<(), BootError> {
         });
     }
 
-    let provider =
-        ferry_daemon::provider::ProviderRegistry::new(token_store_for(&config), config.remote_features_enabled, config.provider_github_client_id.clone());
-
-    ferry_daemon::ipc_server::serve(
-        &listener,
-        &mut ipc_store,
-        &clock,
-        &runtime,
-        &event_bus,
-        &pairing,
-        &provider,
-        &mut ipc_source,
-        &config.data_dir,
-    )?;
+    let mut worker_stores = vec![ipc_store];
+    while worker_stores.len() < IPC_WORKERS {
+        worker_stores.push(open_store(&store_path, &payload_dir, &identity)?.with_presence(presence.clone()));
+    }
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let shared = std::sync::Arc::new((listener, runtime, provider));
+    for mut store in worker_stores {
+        let (shared, pairing, event_bus) = (shared.clone(), pairing.clone(), event_bus.clone());
+        let (data_dir, finished) = (config.data_dir.clone(), finished_tx.clone());
+        std::thread::spawn(move || {
+            let (listener, runtime, provider) = &*shared;
+            let mut source = ferry_daemon::file_source::FilePathSource::new(store.identity().clone());
+            let result = ferry_daemon::ipc_server::serve(
+                listener, &mut store, &clock, runtime, &event_bus, &pairing, provider, &mut source, &data_dir,
+            );
+            let _ = finished.send(result);
+        });
+    }
+    drop(finished_tx);
+    let served = finished_rx.recv().unwrap_or(Ok(()));
     let _ = std::fs::remove_file(&socket_path);
 
-    Ok(())
+    Ok(served?)
+}
+
+fn spawn_p2p_listener(
+    mut bound: Option<std::net::TcpListener>,
+    port: u16,
+    link: ferry_daemon::discovery::PeerLink,
+    auto_accept: bool,
+    live: std::sync::Arc<ferry_core::ipc::LiveHealth>,
+) {
+    std::thread::spawn(move || loop {
+        let listener = match bound.take().map(Ok).unwrap_or_else(|| ferry_daemon::p2p::bind(port)) {
+            Ok(listener) => listener,
+            Err(_) => {
+                std::thread::sleep(P2P_REBIND_INTERVAL);
+                continue;
+            }
+        };
+        live.transport_ok.store(true, Ordering::Relaxed);
+        if let Err(err) = ferry_daemon::p2p::serve_incoming(&listener, &link, auto_accept) {
+            eprintln!("ferry-daemon: P2P listener stopped, restarting it: {err}");
+        }
+        live.transport_ok.store(false, Ordering::Relaxed);
+    });
 }
 
 const HELP: &str = "\

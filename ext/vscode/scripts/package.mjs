@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -13,6 +13,17 @@ const opt = (name) => {
 const target = opt("target");
 const daemon = opt("daemon") ?? process.env.FERRY_DAEMON_BIN;
 const out = opt("out") ?? (target ? `ferry-${target}.vsix` : "ferry.vsix");
+
+const licenseText = readFileSync(path.join(root, "../../LICENSE"), "utf8");
+writeFileSync(path.join(root, "LICENSE"), licenseText);
+
+const manifest = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+const workspace = readFileSync(path.join(root, "../../Cargo.toml"), "utf8");
+const daemonVersion = workspace.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+if (daemonVersion !== manifest.version) {
+  console.error(`version mismatch: the extension is ${manifest.version} but the daemon is ${daemonVersion} — release them together`);
+  process.exit(1);
+}
 
 const binDir = path.join(root, "bin");
 rmSync(binDir, { recursive: true, force: true });

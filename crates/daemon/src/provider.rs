@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ferry_core::ports::{RemoteLocator, Store};
 use ferry_core::remote;
@@ -18,7 +19,7 @@ const PROVIDER: &str = "github";
 const SCOPE: &str = "gist repo";
 
 pub struct ProviderRegistry {
-    enabled: bool,
+    enabled: Arc<AtomicBool>,
     tokens: SecretStore,
     client_id: Option<String>,
     pending: Mutex<Option<DeviceCode>>,
@@ -39,7 +40,7 @@ impl std::fmt::Display for ProviderError {
         match self {
             ProviderError::Disabled => write!(
                 f,
-                "remote provider features are turned off — set remote_features_enabled = true in config.toml and restart"
+                "remote provider features are turned off — turn them on in Settings, or set remote_features_enabled = true in config.toml"
             ),
             ProviderError::NotConnected => write!(f, "no GitHub connection — run: ferry provider connect"),
             ProviderError::NoPendingAuth => write!(f, "no device authorization is in progress"),
@@ -64,7 +65,7 @@ impl ProviderRegistry {
             .filter(|s| !s.trim().is_empty())
             .or(client_id);
         Self {
-            enabled,
+            enabled: Arc::new(AtomicBool::new(enabled)),
             tokens,
             client_id,
             pending: Mutex::new(None),
@@ -77,7 +78,20 @@ impl ProviderRegistry {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.enabled
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    pub fn enabled_flag(&self) -> Arc<AtomicBool> {
+        self.enabled.clone()
+    }
+
+    pub fn sharing_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.enabled = flag;
+        self
     }
 
     fn set_login(&self, login: Option<String>) {
@@ -95,7 +109,7 @@ impl ProviderRegistry {
     }
 
     fn require_enabled(&self) -> Result<(), ProviderError> {
-        if self.enabled {
+        if self.is_enabled() {
             Ok(())
         } else {
             Err(ProviderError::Disabled)
@@ -103,7 +117,7 @@ impl ProviderRegistry {
     }
 
     pub fn status(&self) -> ProviderStatusView {
-        let has_token = self.enabled && matches!(self.token(), Ok(Some(_)));
+        let has_token = self.is_enabled() && matches!(self.token(), Ok(Some(_)));
         let login = if has_token {
             self.cached_login.lock().unwrap().clone()
         } else {
@@ -111,7 +125,7 @@ impl ProviderRegistry {
         };
         ProviderStatusView {
             provider: PROVIDER.into(),
-            enabled: self.enabled,
+            enabled: self.is_enabled(),
             connected: has_token,
             login,
         }

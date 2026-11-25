@@ -66,6 +66,14 @@ pub struct InboxItemSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboundOrigin {
+    pub peer_id: String,
+    pub hash: String,
+    pub size_bytes: u64,
+    pub kind: ItemKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SentItem {
     pub item_id: String,
     pub peer_id: String,
@@ -118,6 +126,30 @@ pub trait Store {
     fn set_inbound_state(&mut self, item_id: &str, state: TransferState) -> Result<(), StoreError>;
 
     fn inbound_bytes_received(&self, item_id: &str) -> Result<u64, StoreError>;
+
+    fn inbound_origin(&self, _item_id: &str) -> Result<Option<InboundOrigin>, StoreError> {
+        Ok(None)
+    }
+
+    fn outbound_recipient(&self, _item_id: &str) -> Result<Option<String>, StoreError> {
+        Ok(None)
+    }
+
+    fn is_inbound_reopenable(&self, _item_id: &str) -> Result<bool, StoreError> {
+        Ok(false)
+    }
+
+    fn purge_inbound_payload(&mut self, _item_id: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn reset_inbound_payload(&mut self, _item_id: &str) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn copy_inbound_file_to(&self, _item_id: &str, _destination: &std::path::Path) -> Result<u64, StoreError> {
+        Err(StoreError("saving an inbound file is not supported by this store".into()))
+    }
 
     fn append_inbound_chunk(&mut self, item_id: &str, seq: u64, bytes: &[u8]) -> Result<(), StoreError>;
 
@@ -204,6 +236,10 @@ pub trait Store {
 
     fn list_open_receipts_for_peer(&self, _peer_id: &str) -> Result<Vec<String>, StoreError> {
         Ok(Vec::new())
+    }
+
+    fn reset_outbox_backoff(&mut self, _outbox_id: &str) -> Result<(), StoreError> {
+        Ok(())
     }
 
     fn remove_open_receipt(&mut self, _item_id: &str) -> Result<(), StoreError> {

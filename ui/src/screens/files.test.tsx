@@ -11,6 +11,7 @@ class RecordingTransport extends MockTransport {
   requests: IpcEnvelope["request"][] = [];
   picked: PickedFile | null = null;
   saved: { name: string; bytes: Uint8Array }[] = [];
+  pickSavePath?: (name: string) => Promise<PickedFile | null>;
 
   override send(envelope: IpcEnvelope): Promise<IpcResponse> {
     this.requests.push(envelope.request);
@@ -99,21 +100,58 @@ describe("file transfer through the UI", () => {
     expect(req.method === "send" && req.params.source_path).toBe("/srv/app/.env");
   });
 
-  it("a delivered file is saved through the host, opening it only once a destination exists", async () => {
-    const transport = setup(
+  function openItem() {
+    return setup(
       "/inbox/IT_FILE",
       <Routes>
         <Route path="/inbox/:itemId" element={<ItemDetailScreen />} />
       </Routes>,
     );
-    const openSpy = vi.spyOn(transport, "send");
+  }
+
+  const methods = (transport: RecordingTransport) => transport.requests.map((r) => r.method);
+
+  it("a host that can pick a destination has the daemon write the file itself", async () => {
+    const transport = openItem();
+    transport.pickSavePath = () => Promise.resolve({ path: "/home/me/diagram.png", name: "diagram.png" });
+    fireEvent.click(await screen.findByRole("button", { name: "Save file" }));
+
+    expect(await screen.findByText("Saved to diagram.png.")).toBeTruthy();
+    const req = transport.requests.find((r) => r.method === "save_to")!;
+    expect(req.method === "save_to" && req.params.destination).toBe("/home/me/diagram.png");
+    expect(methods(transport)).not.toContain("open");
+    expect(methods(transport)).not.toContain("confirm_opened");
+  });
+
+  it("cancelling the destination dialog leaves the item untouched", async () => {
+    const transport = openItem();
+    transport.pickSavePath = () => Promise.resolve(null);
+    fireEvent.click(await screen.findByRole("button", { name: "Save file" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Save file" })).toHaveProperty("disabled", false));
+    expect(methods(transport)).not.toContain("save_to");
+    expect(methods(transport)).not.toContain("confirm_opened");
+  });
+
+  it("a browser host downloads the bytes, then marks the item opened", async () => {
+    const transport = openItem();
     fireEvent.click(await screen.findByRole("button", { name: "Save file" }));
 
     await waitFor(() => expect(transport.saved).toHaveLength(1));
-    expect(transport.saved[0].name).toBe("diagram.png");
     expect(new TextDecoder().decode(transport.saved[0].bytes)).toContain("POSTGRES_URL");
-    expect(openSpy.mock.calls.some(([env]) => env.request.method === "open")).toBe(true);
     expect(await screen.findByText("Saved to diagram.png.")).toBeTruthy();
+    await waitFor(() => expect(methods(transport)).toContain("confirm_opened"));
     expect(document.querySelector("pre.payload-pre")).toBeNull();
+  });
+
+  it("a failed save reports why and never marks the item opened, so nothing is burned", async () => {
+    const transport = openItem();
+    vi.spyOn(transport, "saveFile").mockImplementation(async (_name, produce) => {
+      await produce();
+      throw new Error("disk full");
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Save file" }));
+    expect(await screen.findByText(/disk full/)).toBeTruthy();
+    expect(methods(transport)).toContain("open");
+    expect(methods(transport)).not.toContain("confirm_opened");
   });
 });

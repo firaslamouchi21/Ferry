@@ -20,16 +20,43 @@ pub fn insert_peer(
 ) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO roster_entries (peer_id, display_name, signing_key, sealing_key, paired_at_millis)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (peer_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            signing_key = excluded.signing_key,
+            sealing_key = excluded.sealing_key,
+            paired_at_millis = excluded.paired_at_millis,
+            removed_at_millis = NULL
+         WHERE roster_entries.removed_at_millis IS NOT NULL",
         params![peer_id, display_name, signing_key, sealing_key, now_millis()],
+    )
+    .and_then(|changed| match changed {
+        0 => Err(rusqlite::Error::StatementChangedRows(0)),
+        _ => Ok(()),
+    })
+}
+
+pub fn rename_peer(conn: &Connection, peer_id: &str, display_name: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE roster_entries SET display_name = ?2 WHERE peer_id = ?1 AND removed_at_millis IS NULL",
+        params![peer_id, display_name],
     )?;
     Ok(())
+}
+
+pub fn display_name_even_if_removed(conn: &Connection, peer_id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT display_name FROM roster_entries WHERE peer_id = ?1",
+        params![peer_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 pub fn get_peer(conn: &Connection, peer_id: &str) -> rusqlite::Result<Option<PeerRecord>> {
     conn.query_row(
         "SELECT peer_id, display_name, signing_key, sealing_key, paired_at_millis
-         FROM roster_entries WHERE peer_id = ?1",
+         FROM roster_entries WHERE peer_id = ?1 AND removed_at_millis IS NULL",
         params![peer_id],
         row_to_peer,
     )
@@ -39,7 +66,7 @@ pub fn get_peer(conn: &Connection, peer_id: &str) -> rusqlite::Result<Option<Pee
 pub fn list_peers(conn: &Connection) -> rusqlite::Result<Vec<PeerRecord>> {
     conn.prepare(
         "SELECT peer_id, display_name, signing_key, sealing_key, paired_at_millis
-         FROM roster_entries ORDER BY paired_at_millis",
+         FROM roster_entries WHERE removed_at_millis IS NULL ORDER BY paired_at_millis",
     )?
     .query_map([], row_to_peer)?
     .collect()
@@ -47,8 +74,8 @@ pub fn list_peers(conn: &Connection) -> rusqlite::Result<Vec<PeerRecord>> {
 
 pub fn remove_peer(conn: &Connection, peer_id: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "DELETE FROM roster_entries WHERE peer_id = ?1",
-        params![peer_id],
+        "UPDATE roster_entries SET removed_at_millis = ?2 WHERE peer_id = ?1 AND removed_at_millis IS NULL",
+        params![peer_id, now_millis()],
     )?;
     Ok(())
 }

@@ -116,6 +116,12 @@ export class FerryClient {
   saveFile(name: string, produce: () => Promise<Uint8Array>): Promise<boolean> {
     return this.transport.saveFile(name, produce);
   }
+  canPickSavePath(): boolean {
+    return this.transport.pickSavePath !== undefined;
+  }
+  pickSavePath(name: string): Promise<PickedFile | null> {
+    return this.transport.pickSavePath?.(name) ?? Promise.resolve(null);
+  }
   phase(): ConnectionPhase {
     return this.transport.phase();
   }
@@ -184,6 +190,11 @@ export class FerryClient {
   async open(itemId: string): Promise<string> {
     const r = await this.call({ method: "open", params: { item_id: itemId } });
     return (r as Extract<IpcResult, { result: "open" }>).value.content_base64;
+  }
+
+  async saveTo(itemId: string, destination: string): Promise<number> {
+    const r = await this.call({ method: "save_to", params: { item_id: itemId, destination } });
+    return Number((r as Extract<IpcResult, { result: "saved" }>).value.size_bytes);
   }
 
   async confirmOpened(itemId: string): Promise<void> {

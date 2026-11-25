@@ -1,36 +1,104 @@
 {
   "name": "ferry-vscode",
   "displayName": "Ferry",
-  "description": "Serverless peer-to-peer file, secret, and message transfer for developer teams",
+  "description": "Send files, secrets, and short messages straight to your teammates' machines over the local network — no server, no cloud, no account",
   "private": true,
   "version": "1.0.0",
   "type": "commonjs",
   "publisher": "ferry",
   "icon": "media/icon.png",
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "https://github.com/firaslamouchi21/Ferry.git" },
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Other"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/firaslamouchi21/Ferry.git",
+    "directory": "ext/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
   "main": "./dist/extension.js",
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "viewsContainers": {
-      "activitybar": [{ "id": "ferry", "title": "Ferry", "icon": "media/ferry.svg" }]
+      "activitybar": [
+        {
+          "id": "ferry",
+          "title": "Ferry",
+          "icon": "media/ferry.svg"
+        }
+      ]
     },
     "views": {
-      "ferry": [{ "type": "webview", "id": "ferryMain", "name": "Ferry" }]
+      "ferry": [
+        {
+          "type": "webview",
+          "id": "ferryMain",
+          "name": "Ferry"
+        }
+      ]
     },
     "commands": [
-      { "command": "ferry.open", "title": "Ferry: Open Panel" },
-      { "command": "ferry.pair", "title": "Ferry: Pair a Device" },
-      { "command": "ferry.sendFile", "title": "Ferry: Send File" },
-      { "command": "ferry.openInbox", "title": "Ferry: Open Inbox" },
-      { "command": "ferry.copyFingerprint", "title": "Ferry: Copy My Fingerprint" },
-      { "command": "ferry.startDaemon", "title": "Ferry: Start Daemon" },
-      { "command": "ferry.restartDaemon", "title": "Ferry: Restart Daemon" }
+      {
+        "command": "ferry.open",
+        "title": "Open Panel",
+        "category": "Ferry"
+      },
+      {
+        "command": "ferry.pair",
+        "title": "Pair a Device",
+        "category": "Ferry"
+      },
+      {
+        "command": "ferry.sendFile",
+        "title": "Send File",
+        "category": "Ferry"
+      },
+      {
+        "command": "ferry.openInbox",
+        "title": "Open Inbox",
+        "category": "Ferry"
+      },
+      {
+        "command": "ferry.copyFingerprint",
+        "title": "Copy My Fingerprint",
+        "category": "Ferry"
+      },
+      {
+        "command": "ferry.startDaemon",
+        "title": "Start Daemon",
+        "category": "Ferry"
+      },
+      {
+        "command": "ferry.stopDaemon",
+        "title": "Stop Daemon",
+        "category": "Ferry"
+      },
+      {
+        "command": "ferry.restartDaemon",
+        "title": "Restart Daemon",
+        "category": "Ferry"
+      }
     ],
     "menus": {
-      "explorer/context": [{ "command": "ferry.sendFile", "group": "7_modification", "when": "!explorerResourceIsFolder" }]
+      "explorer/context": [
+        {
+          "command": "ferry.sendFile",
+          "group": "7_modification",
+          "when": "!explorerResourceIsFolder && resourceScheme == file"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "ferry.sendFile",
+          "group": "3_open",
+          "when": "resourceScheme == file"
+        }
+      ]
     },
     "configuration": {
       "title": "Ferry",
@@ -38,12 +106,26 @@
         "ferry.socketPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the Ferry daemon IPC socket. Empty means the platform default."
+          "description": "Path to the Ferry daemon IPC socket. Leave empty for the platform default. When set, the extension connects to that daemon but does not start or manage it.",
+          "scope": "machine"
         },
         "ferry.daemonPath": {
           "type": "string",
           "default": "ferry-daemon",
-          "description": "Path to the ferry-daemon binary. Used only when this build has no bundled binary; the platform-specific extension ships its own."
+          "description": "Path to the ferry-daemon binary. Used only when this build has no bundled binary; the platform-specific extension ships its own.",
+          "scope": "machine"
+        },
+        "ferry.autoStartDaemon": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Start the Ferry daemon when VS Code starts, so teammates can reach this computer. Turn off to start it yourself with “Ferry: Start Daemon”."
+        },
+        "ferry.notifyOnReceive": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Show a notification when something arrives in your Ferry inbox."
         }
       }
     }
@@ -63,5 +145,36 @@
     "esbuild": "^0.21.5",
     "ovsx": "^0.10.1",
     "typescript": "^5.6.3"
+  },
+  "extensionKind": [
+    "ui"
+  ],
+  "keywords": [
+    "file transfer",
+    "peer to peer",
+    "p2p",
+    "lan",
+    "secrets",
+    "env",
+    "airdrop",
+    "share"
+  ],
+  "homepage": "https://github.com/firaslamouchi21/Ferry#readme",
+  "bugs": {
+    "url": "https://github.com/firaslamouchi21/Ferry/issues"
+  },
+  "galleryBanner": {
+    "color": "#0b0f14",
+    "theme": "dark"
+  },
+  "pricing": "Free",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true
+    },
+    "virtualWorkspaces": {
+      "supported": "limited",
+      "description": "Only files saved on this computer can be sent or received."
+    }
   }
 }

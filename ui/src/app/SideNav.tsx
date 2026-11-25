@@ -23,8 +23,12 @@ export function SideNav() {
   const online = phase === "connected";
   const version = status.data?.protocol_version;
 
-  const dotClass = online ? "on" : phase === "connecting" ? "pending" : "off";
-  const statusText = online
+  const degraded = online && status.data != null && !(status.data.discovery_ok && status.data.transport_ok);
+
+  const dotClass = degraded ? "pending" : online ? "on" : phase === "connecting" ? "pending" : "off";
+  const statusText = degraded
+    ? t("nav.degraded")
+    : online
     ? version
       ? t("nav.connectedVersion", { version })
       : t("nav.connected")

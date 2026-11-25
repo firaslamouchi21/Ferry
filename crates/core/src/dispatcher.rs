@@ -1,9 +1,12 @@
+use std::io::{Read, Seek, SeekFrom};
+
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use ferry_proto::states::TransferState;
 
 use crate::expiry::ExpiryClock;
-use crate::ports::{Channel, OutboundSource, Store, StoreError};
+use crate::ports::{Channel, NewOutboundItem, OutboundSource, Store, StoreError};
 use crate::state::TRANSFER_TRANSITIONS;
 use crate::transfer::TransferError;
 
@@ -20,6 +23,7 @@ pub struct DrainOutcome {
     pub dropped: Vec<String>,
     pub deferred: Vec<String>,
     pub receipts_sent: Vec<String>,
+    pub awaiting_decision: Vec<String>,
 }
 
 pub const RETRY_BASE_SECS: u64 = 5;
@@ -59,6 +63,42 @@ fn drop_expired_outbound(store: &mut impl Store, item_id: &str) -> Result<(), St
     Ok(())
 }
 
+pub const SOURCE_REHASH_LIMIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+fn source_is_unchanged(reader: &mut (impl Read + Seek), item: &NewOutboundItem) -> std::io::Result<bool> {
+    let size = reader.seek(SeekFrom::End(0))?;
+    reader.seek(SeekFrom::Start(0))?;
+    if size != item.size_bytes {
+        return Ok(false);
+    }
+    if size > SOURCE_REHASH_LIMIT_BYTES {
+        return Ok(true);
+    }
+    let mut hasher = Sha256::new();
+    std::io::copy(reader, &mut hasher)?;
+    reader.seek(SeekFrom::Start(0))?;
+    Ok(hex::encode(hasher.finalize()) == item.hash)
+}
+
+fn fail_outbound(
+    store: &mut impl Store,
+    outbox_id: &str,
+    item_id: &str,
+    actor: &str,
+    cause: &str,
+    reason: &str,
+) -> Result<(), StoreError> {
+    store.remove_outbox_entry(outbox_id)?;
+    if let Some(current) = store.get_outbound_state(item_id)? {
+        if TRANSFER_TRANSITIONS.validate(current, TransferState::Failed).is_ok() {
+            store.set_outbound_state(item_id, TransferState::Failed)?;
+        }
+    }
+    store.set_outbound_last_error(item_id, reason)?;
+    store.record_outbound_dropped(item_id, actor, cause)?;
+    store.discard_staged_source(item_id)
+}
+
 pub fn drain_outbox_for_peer(
     store: &mut impl Store,
     channel: &mut impl Channel,
@@ -81,8 +121,19 @@ pub fn drain_outbox_for_peer_reporting(
 ) -> Result<DrainOutcome, DispatchError> {
     let entries = store.list_outbox_for_peer(peer_id)?;
     let mut outcome = DrainOutcome::default();
+    let mut channel_in_sync = true;
 
     for entry in entries {
+        if matches!(
+            store.get_outbound_state(&entry.item_id)?,
+            Some(TransferState::Delivered | TransferState::Opened)
+        ) {
+            store.remove_outbox_entry(&entry.outbox_id)?;
+            store.discard_staged_source(&entry.item_id)?;
+            outcome.delivered.push(entry.item_id);
+            continue;
+        }
+
         if let Some(deadline) = store.get_outbox_expiry(&entry.item_id)? {
             if clock.is_expired(&deadline) {
                 store.remove_outbox_entry(&entry.outbox_id)?;
@@ -98,6 +149,11 @@ pub fn drain_outbox_for_peer_reporting(
             }
         }
 
+        if !channel_in_sync {
+            outcome.deferred.push(entry.item_id);
+            continue;
+        }
+
         if !is_retry_eligible(entry.attempts, entry.last_attempted_at_millis, now_millis()) {
             outcome.deferred.push(entry.item_id);
             continue;
@@ -110,13 +166,41 @@ pub fn drain_outbox_for_peer_reporting(
 
         store.record_outbox_attempt(&entry.outbox_id)?;
 
-        let reader = match source.open(&entry.item_id) {
+        let mut reader = match source.open(&entry.item_id) {
             Ok(reader) => reader,
             Err(io_err) => {
+                store.set_outbound_last_error(
+                    &entry.item_id,
+                    &format!("the source could not be read: {io_err}"),
+                )?;
                 outcome.failed.push((entry.item_id, TransferError::Io(io_err)));
                 continue;
             }
         };
+
+        match source_is_unchanged(&mut reader, &item) {
+            Ok(true) => {}
+            Ok(false) => {
+                fail_outbound(
+                    store,
+                    &entry.outbox_id,
+                    &entry.item_id,
+                    actor,
+                    "source_changed",
+                    "the file changed after it was queued — retry to send the current version",
+                )?;
+                outcome.dropped.push(entry.item_id);
+                continue;
+            }
+            Err(io_err) => {
+                store.set_outbound_last_error(
+                    &entry.item_id,
+                    &format!("the source could not be read: {io_err}"),
+                )?;
+                outcome.failed.push((entry.item_id, TransferError::Io(io_err)));
+                continue;
+            }
+        }
 
         match crate::transfer::send_item_reporting(channel, store, &entry.item_id, &item, reader, on_progress) {
             Ok(()) => {
@@ -128,26 +212,51 @@ pub fn drain_outbox_for_peer_reporting(
                 store.remove_outbox_entry(&entry.outbox_id)?;
                 store.set_outbound_last_error(
                     &entry.item_id,
-                    &format!("the receiver declined the transfer: {reason}"),
+                    &format!("the receiver declined the transfer, or could not verify it: {reason}"),
                 )?;
                 store.record_outbound_dropped(&entry.item_id, actor, "declined")?;
                 store.discard_staged_source(&entry.item_id)?;
                 outcome.dropped.push(entry.item_id);
             }
+            Err(err @ TransferError::Cancelled(_)) => {
+                channel_in_sync = false;
+                outcome.failed.push((entry.item_id, err));
+            }
+            Err(err @ TransferError::Channel(_))
+                if store.get_outbound_state(&entry.item_id)? == Some(TransferState::Offered) =>
+            {
+                channel_in_sync = false;
+                store.reset_outbox_backoff(&entry.outbox_id)?;
+                store.set_outbound_last_error(&entry.item_id, "waiting for the receiver to accept or reject it")?;
+                outcome.awaiting_decision.push(entry.item_id.clone());
+                outcome.failed.push((entry.item_id, err));
+            }
             Err(err) => {
+                channel_in_sync = false;
                 store.set_outbound_last_error(&entry.item_id, &err.to_string())?;
                 outcome.failed.push((entry.item_id, err));
             }
         }
     }
 
+    if !channel_in_sync {
+        return Ok(outcome);
+    }
+
     for item_id in store.list_open_receipts_for_peer(peer_id)? {
         let opened = ferry_proto::envelope::WireMessage::Opened(ferry_proto::envelope::Opened {
             item_id: ferry_proto::ids::ItemId(item_id.clone()),
         });
-        if crate::transfer::send_message(channel, opened).is_ok() {
+        let acknowledged = crate::transfer::send_message(channel, opened).is_ok()
+            && matches!(
+                crate::transfer::recv_message(channel),
+                Ok(ferry_proto::envelope::WireMessage::Delivered(ack)) if ack.item_id.0 == item_id
+            );
+        if acknowledged {
             store.remove_open_receipt(&item_id)?;
             outcome.receipts_sent.push(item_id);
+        } else {
+            break;
         }
     }
 
@@ -236,6 +345,10 @@ mod tests {
     }
 
     impl FakeStore {
+        fn attempts_for(&self, outbox_id: &str) -> u32 {
+            self.attempts.get(outbox_id).copied().unwrap_or(0)
+        }
+
         fn last_error_for(&self, item_id: &str) -> Option<String> {
             self.last_errors.get(item_id).cloned()
         }
@@ -352,6 +465,15 @@ mod tests {
             *self.attempts.entry(outbox_id.to_string()).or_insert(0) += 1;
             if let Some(entry) = self.outbox.iter_mut().find(|e| e.outbox_id == outbox_id) {
                 entry.attempts += 1;
+                entry.last_attempted_at_millis = Some(super::now_millis());
+            }
+            Ok(())
+        }
+
+        fn reset_outbox_backoff(&mut self, outbox_id: &str) -> Result<(), StoreError> {
+            self.attempts.insert(outbox_id.to_string(), 1);
+            if let Some(entry) = self.outbox.iter_mut().find(|e| e.outbox_id == outbox_id) {
+                entry.attempts = 1;
                 entry.last_attempted_at_millis = Some(super::now_millis());
             }
             Ok(())
@@ -665,6 +787,11 @@ mod tests {
         let (mut sender_channel, mut receiver_channel) = paired_channels("peer-a", "peer-b");
         let clock = crate::expiry::ExpiryClock::new();
 
+        let acker = std::thread::spawn(move || {
+            let seen = crate::transfer::recv_message(&mut receiver_channel).unwrap();
+            crate::transfer::send_delivered(&mut receiver_channel, "item-9").unwrap();
+            seen
+        });
         let outcome =
             drain_outbox_for_peer(&mut store, &mut sender_channel, &clock, "peer-b", "local", &mut source).unwrap();
 
@@ -674,9 +801,117 @@ mod tests {
             "a sent receipt must be removed from the owed queue"
         );
 
-        match crate::transfer::recv_message(&mut receiver_channel).unwrap() {
+        match acker.join().unwrap() {
             WireMessage::Opened(opened) => assert_eq!(opened.item_id.0, "item-9"),
             other => panic!("expected a bare Opened on the wire, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_file_edited_after_it_was_queued_fails_with_a_reason_instead_of_corrupting_the_receiver() {
+        use sha2::{Digest, Sha256};
+
+        let mut store = FakeStore::with_peer("peer-b");
+        store.enqueue("item-1", sample_item(&hex::encode(Sha256::digest(b"old")), 3));
+        let mut source = InMemorySource {
+            contents: HashMap::from([("item-1".to_string(), b"new".to_vec())]),
+            fail_for: None,
+        };
+        let (mut channel, receiver) = paired_channels("peer-a", "peer-b");
+        let clock = crate::expiry::ExpiryClock::new();
+        let outcome = drain_outbox_for_peer(&mut store, &mut channel, &clock, "peer-b", "local", &mut source).unwrap();
+
+        assert_eq!(outcome.dropped, vec!["item-1".to_string()]);
+        assert_eq!(store.get_outbound_state("item-1").unwrap(), Some(TransferState::Failed));
+        assert!(store.list_outbox_for_peer("peer-b").unwrap().is_empty());
+        assert!(store.last_error_for("item-1").unwrap().contains("changed"));
+        assert!(receiver.rx.try_recv().is_err(), "a stale source must never be offered");
+    }
+
+    #[test]
+    fn a_missing_source_tells_the_sender_why() {
+        let mut store = FakeStore::with_peer("peer-b");
+        store.enqueue("item-1", sample_item("irrelevant", 3));
+        let mut source = InMemorySource { contents: HashMap::new(), fail_for: Some("item-1".into()) };
+        let (mut channel, _receiver) = paired_channels("peer-a", "peer-b");
+        let clock = crate::expiry::ExpiryClock::new();
+        drain_outbox_for_peer(&mut store, &mut channel, &clock, "peer-b", "local", &mut source).unwrap();
+        assert!(store.last_error_for("item-1").unwrap().contains("missing source"));
+    }
+
+    #[test]
+    fn a_broken_connection_does_not_burn_attempts_on_the_items_queued_behind_it() {
+        use sha2::{Digest, Sha256};
+
+        let hash = hex::encode(Sha256::digest(b"abc"));
+        let mut store = FakeStore::with_peer("peer-b");
+        store.enqueue("item-1", sample_item(&hash, 3));
+        store.enqueue("item-2", sample_item(&hash, 3));
+        let mut source = InMemorySource {
+            contents: HashMap::from([
+                ("item-1".to_string(), b"abc".to_vec()),
+                ("item-2".to_string(), b"abc".to_vec()),
+            ]),
+            fail_for: None,
+        };
+        let (mut channel, receiver) = paired_channels("peer-a", "peer-b");
+        drop(receiver);
+        let clock = crate::expiry::ExpiryClock::new();
+        let outcome = drain_outbox_for_peer(&mut store, &mut channel, &clock, "peer-b", "local", &mut source).unwrap();
+
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.deferred, vec!["item-2".to_string()]);
+        assert_eq!(store.attempts.get("outbox-item-2"), None);
+    }
+
+    #[test]
+    fn an_entry_whose_item_is_already_delivered_is_cleared_rather_than_expired_later() {
+        let mut store = FakeStore::with_peer("peer-b");
+        store.enqueue("item-1", sample_item("irrelevant", 3));
+        store.set_outbound_state("item-1", TransferState::Delivered).unwrap();
+        let clock = crate::expiry::ExpiryClock::new();
+        store.set_outbox_expiry("item-1", &clock.compute_deadline(0)).unwrap();
+        let mut source = InMemorySource { contents: HashMap::new(), fail_for: None };
+        let (mut channel, _receiver) = paired_channels("peer-a", "peer-b");
+        drain_outbox_for_peer(&mut store, &mut channel, &clock, "peer-b", "local", &mut source).unwrap();
+
+        assert_eq!(store.get_outbound_state("item-1").unwrap(), Some(TransferState::Delivered));
+        assert!(store.list_outbox_for_peer("peer-b").unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_owed_receipt_stays_owed_until_the_other_side_acknowledges_it() {
+        let mut store = FakeStore::with_peer("peer-b");
+        store.open_receipts.insert("peer-b".to_string(), vec!["item-9".to_string()]);
+        let mut source = InMemorySource { contents: HashMap::new(), fail_for: None };
+        let (mut sender_channel, receiver_channel) = paired_channels("peer-a", "peer-b");
+        drop(receiver_channel);
+        let clock = crate::expiry::ExpiryClock::new();
+        let outcome =
+            drain_outbox_for_peer(&mut store, &mut sender_channel, &clock, "peer-b", "local", &mut source).unwrap();
+        assert!(outcome.receipts_sent.is_empty());
+        assert_eq!(store.list_open_receipts_for_peer("peer-b").unwrap(), vec!["item-9".to_string()]);
+    }
+
+    #[test]
+    fn an_offer_the_receiver_is_still_deciding_on_is_retried_soon_and_does_not_block_the_queue() {
+        use sha2::Digest;
+        let mut store = FakeStore::with_peer("peer-b");
+        let hash = hex::encode(sha2::Sha256::digest(b"abc"));
+        store.enqueue("item-1", sample_item(&hash, 3));
+        store.enqueue("item-2", sample_item(&hash, 3));
+        let mut source = InMemorySource {
+            contents: HashMap::from([("item-1".to_string(), b"abc".to_vec())]),
+            fail_for: None,
+        };
+        let (mut channel, receiver) = paired_channels("peer-a", "peer-b");
+        drop(receiver);
+        let clock = crate::expiry::ExpiryClock::new();
+        let outcome = drain_outbox_for_peer(&mut store, &mut channel, &clock, "peer-b", "local", &mut source).unwrap();
+
+        assert_eq!(outcome.awaiting_decision, vec!["item-1".to_string()]);
+        assert_eq!(outcome.deferred, vec!["item-2".to_string()]);
+        assert_eq!(store.attempts_for("outbox-item-1"), 1, "backoff must restart at the shortest step, not grow");
+        assert!(store.last_error_for("item-1").unwrap().contains("accept"));
     }
 }

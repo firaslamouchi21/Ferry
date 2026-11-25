@@ -11,6 +11,14 @@ use interprocess::local_socket::GenericFilePath;
 
 pub use interprocess::local_socket::{Listener, Stream};
 
+pub fn windows_pipe_name(user: &str, file_name: &str) -> String {
+    let safe: String = user
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    format!("{safe}-{file_name}")
+}
+
 fn ipc_name(socket_path: &Path) -> io::Result<Name<'static>> {
     #[cfg(windows)]
     {
@@ -18,7 +26,8 @@ fn ipc_name(socket_path: &Path) -> io::Result<Name<'static>> {
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "ipc socket path has no file name"))?;
-        stem.to_owned().to_ns_name::<GenericNamespaced>()
+        let user = std::env::var("USERNAME").unwrap_or_default();
+        windows_pipe_name(&user, stem).to_ns_name::<GenericNamespaced>()
     }
     #[cfg(not(windows))]
     {
@@ -32,7 +41,13 @@ pub fn bind(socket_path: &Path) -> io::Result<Listener> {
         let _ = std::fs::remove_file(socket_path);
     }
     let name = ipc_name(socket_path)?;
-    ListenerOptions::new().name(name).create_sync()
+    let listener = ListenerOptions::new().name(name).create_sync()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(listener)
 }
 
 pub fn connect(socket_path: &Path) -> io::Result<Stream> {
@@ -193,5 +208,12 @@ mod tests {
             .is_err());
         assert!(started.elapsed() < Duration::from_secs(3));
         cleanup(&path);
+    }
+
+    #[test]
+    fn a_windows_pipe_name_is_scoped_to_the_user_and_cannot_escape_the_namespace() {
+        assert_eq!(windows_pipe_name("alice", "ferry.sock"), "alice-ferry.sock");
+        assert_ne!(windows_pipe_name("alice", "ferry.sock"), windows_pipe_name("bob", "ferry.sock"));
+        assert_eq!(windows_pipe_name("DOM\\a b", "ferry.sock"), "DOM_a_b-ferry.sock");
     }
 }

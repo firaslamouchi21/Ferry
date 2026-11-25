@@ -8,6 +8,8 @@ import type { RosterPeerView } from "@/lib/ipc";
 import { Async, ScreenHeader } from "./parts";
 import { useT, useTParts } from "@/lib/i18n";
 
+const RECENTLY_SEEN_MS = 10 * 60_000;
+
 export function PeersScreen() {
   const navigate = useNavigate();
   const ferry = useFerryClient();
@@ -103,11 +105,11 @@ export function PeersScreen() {
                   header: t("peers.colStatus"),
                   render: (p) => {
                     const seen = p.last_seen_millis == null ? null : num(p.last_seen_millis);
-                    const veryRecent = seen != null && Date.now() - seen < 45_000;
-                    const tone = veryRecent ? "online" : p.reachable ? "warn" : "offline";
-                    const label = veryRecent
+                    const recent = seen != null && Date.now() - seen < RECENTLY_SEEN_MS;
+                    const tone = p.reachable ? "online" : recent ? "warn" : "offline";
+                    const label = p.reachable
                       ? t("common.online")
-                      : p.reachable
+                      : recent
                         ? t("peers.recentlySeen")
                         : t("common.offline");
                     return (

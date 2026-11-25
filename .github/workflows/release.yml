@@ -20,19 +20,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, name: linux-x86_64, target: x86_64-unknown-linux-gnu }
-          - { os: macos-latest, name: macos-aarch64, target: aarch64-apple-darwin }
-          - { os: windows-latest, name: windows-x86_64, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-22.04, name: linux-x86_64, target: x86_64-unknown-linux-gnu, runnable: true }
+          - { os: ubuntu-22.04-arm, name: linux-aarch64, target: aarch64-unknown-linux-gnu, runnable: true }
+          - { os: macos-latest, name: macos-aarch64, target: aarch64-apple-darwin, runnable: true }
+          - { os: macos-latest, name: macos-x86_64, target: x86_64-apple-darwin, runnable: false }
+          - { os: windows-latest, name: windows-x86_64, target: x86_64-pc-windows-msvc, runnable: true }
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned Rust toolchain
         run: rustup show
       - run: rustup target add ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - name: Build release binaries
         run: cargo build --release --locked --target ${{ matrix.target }} -p ferry-daemon -p ferry-cli
 
       - name: Smoke-run the freshly built binaries
+        if: matrix.runnable
         shell: bash
         run: |
           ext=""
@@ -69,7 +74,7 @@ jobs:
         run: pwsh .github/scripts/sign-windows.ps1 dist
 
       - name: Sign Linux binaries
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
@@ -181,8 +186,11 @@ jobs:
       matrix:
         include:
           - { vsce_target: linux-x64, daemon_artifact: ferry-linux-x86_64, daemon_file: ferry-daemon-linux-x86_64 }
+          - { vsce_target: linux-arm64, daemon_artifact: ferry-linux-aarch64, daemon_file: ferry-daemon-linux-aarch64 }
+          - { vsce_target: darwin-x64, daemon_artifact: ferry-macos-x86_64, daemon_file: ferry-daemon-macos-x86_64 }
           - { vsce_target: darwin-arm64, daemon_artifact: ferry-macos-aarch64, daemon_file: ferry-daemon-macos-aarch64 }
           - { vsce_target: win32-x64, daemon_artifact: ferry-windows-x86_64, daemon_file: ferry-daemon-windows-x86_64.exe }
+          - { vsce_target: win32-arm64, daemon_artifact: ferry-windows-x86_64, daemon_file: ferry-daemon-windows-x86_64.exe }
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -233,7 +241,10 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-        working-directory: ext/vscode
+      - name: The tag and the extension version must agree
+        run: |
+          version="$(node -p "require('./ext/vscode/package.json').version")"
+          [ "${GITHUB_REF_NAME}" = "v${version}" ] || { echo "tag ${GITHUB_REF_NAME} does not match extension version ${version}"; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           pattern: ferry-vsix-*
@@ -242,12 +253,12 @@ jobs:
       - name: Publish to the VS Code Marketplace
         if: env.VSCE_PAT != ''
         working-directory: ext/vscode
-        run: pnpm exec vsce publish --no-dependencies --packagePath $(ls ../../vsix/*.vsix)
+        run: pnpm exec vsce publish --skip-duplicate --packagePath ../../vsix/*.vsix
       - name: Publish to Open VSX
         if: env.OVSX_PAT != ''
         working-directory: ext/vscode
         run: |
-          for f in ../../vsix/*.vsix; do pnpm exec ovsx publish "$f" -p "$OVSX_PAT" || true; done
+          for f in ../../vsix/*.vsix; do pnpm exec ovsx publish "$f" -p "$OVSX_PAT" --skip-duplicate; done
       - name: Note when publishing was skipped
         if: env.VSCE_PAT == '' && env.OVSX_PAT == ''
         run: echo "Neither VSCE_PAT nor OVSX_PAT is set — see docs/VSCODE_MARKETPLACE_SETUP.md. Skipping marketplace publish; the .vsix files are still attached to the GitHub Release."

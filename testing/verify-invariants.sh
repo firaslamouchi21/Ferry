@@ -201,6 +201,37 @@ peer a "$CLI" roster export "$ROOT/a-roster.json" >/dev/null 2>&1 || bad "roster
 peer b "$CLI" roster import "$ROOT/a-roster.json" --yes >/dev/null 2>&1 || bad "roster import failed"
 peer b "$CLI" activity --limit 40 2>/dev/null | grep -q "roster.imported" \
   && ok "b logged roster.imported" || bad "b has no roster.imported audit row"
+peer b "$CLI" roster list 2>/dev/null | grep -q "$BID" \
+  && bad "importing a teammate's roster added this machine to its own roster" || ok "a machine never imports itself as a peer"
+
+wait_presence() {
+  local name=$1 needle=$2 want=$3 tries=$4
+  for _ in $(seq 1 "$tries"); do
+    peer "$name" "$CLI" peer list 2>/dev/null | grep -i "$needle" | grep -qi "$want" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+echo
+echo "== peer status: a freshly paired, idle peer shows online on both sides, without sending anything =="
+if wait_presence a peer-b online 45 && wait_presence b peer-a online 45; then
+  ok "both sides show each other online right after pairing"
+  IDLE_SECS=${FERRY_IDLE_SECS:-100}
+  echo "     idling ${IDLE_SECS}s — longer than the reachability window"
+  sleep "$IDLE_SECS"
+  peer a "$CLI" peer list 2>/dev/null | grep -i peer-b | grep -qi online \
+    && ok "an idle peer stays online past the reachability window" || bad "an idle but running peer went offline"
+  stop_peer b KILL
+  wait_presence a peer-b offline 45 && ok "a killed peer turns offline promptly" || bad "a killed peer still shows online"
+  start_peer b "$PORT_B"
+  for _ in $(seq 1 40); do peer b "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+  wait_presence a peer-b online 45 && ok "a returning peer turns online again" || bad "a returning peer never came back online"
+elif [ "${FERRY_STRICT:-0}" = 1 ]; then
+  bad "peers never saw each other online and FERRY_STRICT=1"
+else
+  skip "peers never saw each other — mDNS multicast unavailable on this host"
+fi
 
 MDNS_OK=1
 echo
@@ -281,16 +312,22 @@ if [ "$MDNS_OK" = 1 ]; then
 
   echo
   echo "== kill mid-transfer: receiver is SIGKILLed mid-stream, transfer resumes on restart =="
-  stop_peer b
-  FERRY_TEST_CHUNK_DELAY_MS=150 start_peer b "$PORT_B"
-  for _ in $(seq 1 40); do peer b "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+  stop_peer a
+  FERRY_TEST_CHUNK_DELAY_MS=150 start_peer a "$PORT_A"
+  for _ in $(seq 1 40); do peer a "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+  wait_presence a peer-b online 45 >/dev/null || true
   head -c 3000000 /dev/urandom > "$ROOT/big.bin"
   BIGWANT=$(sha256sum "$ROOT/big.bin" | awk '{print $1}')
   peer a "$CLI" send "$BID" "$ROOT/big.bin" --ttl 3600 >/dev/null 2>&1 || bad "big send failed to queue"
-  sleep 3
+  partial=0
+  for _ in $(seq 1 100); do
+    partial=$(find "$ROOT/b/xdg" -name '*.bin' -size +300k -size -2800k -printf '%s\n' 2>/dev/null | sort -rn | head -1)
+    [ -n "$partial" ] && break
+    sleep 0.1
+  done
   stop_peer b KILL
-  partial=$(find "$ROOT/b/xdg" -name '*.bin' -printf '%s\n' 2>/dev/null | sort -rn | head -1)
-  echo "     receiver held ~${partial:-0} bytes when it was killed"
+  echo "     receiver held ~${partial:-0} of 3000000 bytes when it was killed"
+  [ -n "$partial" ] && ok "the receiver really was killed mid-stream" || bad "the receiver was not mid-stream when killed"
   start_peer b "$PORT_B"
   for _ in $(seq 1 40); do peer b "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
   if item=$(wait_delivered b big.bin); then
@@ -300,6 +337,73 @@ if [ "$MDNS_OK" = 1 ]; then
       || bad "resumed transfer produced the wrong content"
   else
     bad "transfer never completed after the receiver was killed and restarted"
+  fi
+  stop_peer a
+  start_peer a "$PORT_A"
+  for _ in $(seq 1 40); do peer a "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+fi
+
+if [ "$MDNS_OK" = 1 ]; then
+  echo
+  echo "== a file larger than one IPC frame is saved whole, a failed save loses nothing, and it can be saved again =="
+  head -c 70000000 /dev/urandom > "$ROOT/large.bin"
+  LWANT=$(sha256sum "$ROOT/large.bin" | awk '{print $1}')
+  peer a "$CLI" send "$BID" "$ROOT/large.bin" --ttl 3600 >/dev/null 2>&1 || bad "large send failed to queue"
+  if item=$(wait_delivered b large.bin); then
+    peer b "$CLI" receive open "$item" --out "$ROOT/no-such-folder/large.got" >/dev/null 2>&1 \
+      && bad "a save into a missing folder reported success" || ok "a save into a missing folder fails"
+    peer b "$CLI" receive open "$item" --out "$ROOT/large.got" >/dev/null 2>&1
+    [ "$(sha256sum "$ROOT/large.got" 2>/dev/null | awk '{print $1}')" = "$LWANT" ] \
+      && ok "the 70 MB file was still there and saved intact" || bad "the large file could not be saved"
+    peer b "$CLI" receive open "$item" --out "$ROOT/large.again" >/dev/null 2>&1
+    [ "$(sha256sum "$ROOT/large.again" 2>/dev/null | awk '{print $1}')" = "$LWANT" ] \
+      && ok "an ordinary file can be saved a second time" || bad "a second save of an ordinary file failed"
+  else
+    bad "large file not delivered"
+  fi
+
+  echo
+  echo "== notify-on-open: the item is delivered at once and turns opened only after it is opened =="
+  printf 'notify-%s\n' "$(date +%s%N)" > "$ROOT/notify.txt"
+  peer a "$CLI" send "$BID" "$ROOT/notify.txt" --ttl 3600 --notify-on-open >/dev/null 2>&1 || bad "notify send failed to queue"
+  if item=$(wait_delivered b notify.txt); then
+    sleep 2
+    peer a "$CLI" sent list 2>/dev/null | grep -i notify.txt | grep -qi delivered \
+      && ok "the sender sees delivered without waiting for an open" || bad "the sender is stuck on a notify-on-open item"
+    peer b "$CLI" receive open "$item" --out "$ROOT/notify.got" >/dev/null 2>&1
+    opened=""
+    for _ in $(seq 1 "$RECV_TIMEOUT"); do
+      peer a "$CLI" sent list 2>/dev/null | grep -i notify.txt | grep -qi opened && { opened=1; break; }
+      sleep 1
+    done
+    [ -n "$opened" ] && ok "the open receipt reached the sender" || bad "the open receipt never reached the sender"
+  else
+    bad "notify-on-open item not delivered"
+  fi
+
+  echo
+  echo "== a file edited after it was queued is refused with a reason, and retry sends the current version =="
+  stop_peer b
+  echo "version one" > "$ROOT/edited.txt"
+  peer a "$CLI" send "$BID" "$ROOT/edited.txt" --ttl 3600 >/dev/null 2>&1
+  echo "version two, longer" > "$ROOT/edited.txt"
+  start_peer b "$PORT_B"
+  for _ in $(seq 1 40); do peer b "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+  failed=""
+  for _ in $(seq 1 "$RECV_TIMEOUT"); do
+    failed=$(peer a "$CLI" sent list 2>/dev/null | grep -i edited.txt | grep -i failed | awk '{print $1}' | head -1 || true)
+    [ -n "$failed" ] && break
+    sleep 1
+  done
+  [ -n "$failed" ] && ok "the stale queue entry failed instead of corrupting the receiver" || bad "an edited source was never reported"
+  if [ -n "$failed" ]; then
+    peer a "$CLI" sent retry "$failed" >/dev/null 2>&1 || bad "retry of the failed item was rejected"
+    if item=$(wait_delivered b edited.txt); then
+      peer b "$CLI" receive open "$item" --out "$ROOT/edited.got" >/dev/null 2>&1
+      cmp -s "$ROOT/edited.txt" "$ROOT/edited.got" && ok "retry delivered the current version" || bad "retry delivered the wrong content"
+    else
+      bad "retry never delivered"
+    fi
   fi
 fi
 
@@ -349,6 +453,12 @@ if [ "$MDNS_OK" = 1 ]; then
   done
   [ -n "$got" ] && ok "the queued message drained to b after it came back" || bad "offline message never drained"
 fi
+
+echo
+echo "== removing a peer that has transfer history =="
+peer a "$CLI" peer remove "$BID" --yes >/dev/null 2>&1 && ok "a peer with history can be removed" || bad "removing a peer with history failed"
+peer a "$CLI" roster list 2>/dev/null | grep -qi peer-b && bad "the removed peer is still listed" || ok "the removed peer is gone from the roster"
+peer a "$CLI" send "$BID" "$ROOT/x.bin" >/dev/null 2>&1 && bad "sending to a removed peer was accepted" || ok "sending to a removed peer is refused"
 
 echo
 echo "== audit log is content-free =="

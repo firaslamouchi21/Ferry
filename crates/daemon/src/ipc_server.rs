@@ -5,6 +5,8 @@ use ferry_net::framing::{self, FramingError, IPC_MAX_FRAME_BYTES};
 use ferry_net::local_ipc::{self, Listener, Stream};
 
 const IPC_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(200);
+const MAX_CONSECUTIVE_ACCEPT_FAILURES: u32 = 100;
 
 use ferry_core::expiry::ExpiryClock;
 use ferry_core::ipc::RuntimeStatus;
@@ -55,8 +57,21 @@ pub fn serve(
     source: &mut impl ferry_core::ports::OutboundSource,
     data_dir: &Path,
 ) -> Result<(), IpcServerError> {
+    let mut consecutive_failures = 0u32;
     loop {
-        let stream = local_ipc::accept(listener).map_err(IpcServerError::Accept)?;
+        let stream = match local_ipc::accept(listener) {
+            Ok(stream) => stream,
+            Err(err) => {
+                consecutive_failures += 1;
+                if consecutive_failures > MAX_CONSECUTIVE_ACCEPT_FAILURES {
+                    return Err(IpcServerError::Accept(err));
+                }
+                eprintln!("ferry-daemon: could not accept an IPC connection: {err}");
+                std::thread::sleep(ACCEPT_RETRY_DELAY);
+                continue;
+            }
+        };
+        consecutive_failures = 0;
         if handle_connection(stream, store, clock, source, runtime, event_bus, pairing, provider, data_dir) {
             return Ok(());
         }
@@ -96,6 +111,7 @@ fn handle_connection(
         IPC_MAX_FRAME_BYTES,
     ) {
         Ok(frame) => frame,
+        Err(FramingError::Io(err)) if is_probe_disconnect(&err) => return false,
         Err(err) => {
             eprintln!("ferry-daemon: dropping IPC connection — failed to read frame: {err}");
             return false;
@@ -125,7 +141,7 @@ fn handle_connection(
     }
 
     if let IpcRequest::SetRemoteFeaturesEnabled { enabled } = envelope.request {
-        let response = handle_set_remote_features_enabled(&envelope.request_id, enabled, data_dir);
+        let response = handle_set_remote_features_enabled(&envelope.request_id, enabled, data_dir, provider);
         write_response(&mut stream, &response);
         return false;
     }
@@ -161,10 +177,34 @@ fn handle_connection(
     quit
 }
 
+fn is_probe_disconnect(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+    )
+}
+
 fn write_response(stream: &mut Stream, response: &IpcResponse) {
     match serde_json::to_vec(response) {
         Ok(bytes) => {
-            if let Err(err) = ipc_write_frame(stream, &bytes) {
+            let written = match ipc_write_frame(stream, &bytes) {
+                Err(FramingError::OversizeFrame(size, limit)) => {
+                    let refusal = IpcResponse {
+                        request_id: response.request_id.clone(),
+                        outcome: IpcOutcome::Err {
+                            error: FerryError {
+                                code: ErrorCode::FrameTooLarge,
+                                message: format!("the response is {size} bytes, over the {limit} byte limit"),
+                            },
+                        },
+                    };
+                    serde_json::to_vec(&refusal)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| ipc_write_frame(stream, &bytes).map_err(|e| e.to_string()))
+                }
+                other => other.map_err(|e| e.to_string()),
+            };
+            if let Err(err) = written {
                 eprintln!("ferry-daemon: failed to write IPC response: {err}");
             }
         }
@@ -330,9 +370,17 @@ fn write_remote_features_enabled(data_dir: &Path, enabled: bool) -> Result<(), S
     std::fs::write(&config_path, serialized).map_err(|e| format!("failed to write {}: {e}", config_path.display()))
 }
 
-fn handle_set_remote_features_enabled(request_id: &RequestId, enabled: bool, data_dir: &Path) -> IpcResponse {
+fn handle_set_remote_features_enabled(
+    request_id: &RequestId,
+    enabled: bool,
+    data_dir: &Path,
+    provider: &ProviderRegistry,
+) -> IpcResponse {
     match write_remote_features_enabled(data_dir, enabled) {
-        Ok(()) => ok(request_id, IpcResult::Ack),
+        Ok(()) => {
+            provider.set_enabled(enabled);
+            ok(request_id, IpcResult::Ack)
+        }
         Err(message) => provider_err(request_id, ErrorCode::Internal, message),
     }
 }
@@ -379,10 +427,7 @@ fn handle_pairing(
             Err(e) => pairing_err(request_id, e),
         },
         IpcRequest::PairStatus { pairing_id } => {
-            if let Some(peer) = pairing.take_pending_persist(&pairing_id) {
-                if let Err(e) = store.add_paired_peer(&peer) {
-                    return pairing_err(request_id, format!("pairing succeeded but the peer could not be saved: {e}"));
-                }
+            if pairing.persist_pending(&mut |peer| store.add_paired_peer(peer).map_err(|e| e.to_string())) {
                 event_bus.emit(IpcEvent::Changed {
                     resource: IpcResource::Roster,
                     id: None,
@@ -415,7 +460,7 @@ fn event_for(request: &IpcRequest, response: &IpcResponse) -> Option<IpcEvent> {
         (IpcRequest::Send { .. }, IpcResult::Send { item_id }) => {
             (IpcResource::Transfer, Some(item_id.clone()))
         }
-        (IpcRequest::ConfirmOpened { item_id }, _) => (IpcResource::Transfer, Some(item_id.clone())),
+        (IpcRequest::ConfirmOpened { item_id }, _) | (IpcRequest::SaveTo { item_id, .. }, _) => (IpcResource::Transfer, Some(item_id.clone())),
         (IpcRequest::ImportSealed { .. }, IpcResult::ImportSealed(view)) => {
             (IpcResource::Transfer, Some(view.item_id.clone()))
         }
@@ -637,6 +682,30 @@ mod tests {
         send_request(&socket_path, IpcRequest::Quit, IPC_PROTOCOL_VERSION);
         server_thread.join().unwrap();
         let _ = std::fs::remove_file(&socket_path);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    #[test]
+    fn turning_the_github_features_on_applies_to_the_running_daemon_without_a_restart() {
+        let data_dir = std::env::temp_dir().join(format!("ferry-toggle-{}", uuid::Uuid::now_v7()));
+        let provider = crate::provider::ProviderRegistry::new(
+            ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"),
+            false,
+            None,
+        );
+        let worker_view = crate::provider::ProviderRegistry::new(
+            ferry_crypto::secret_store::SecretStore::keychain("dev.ferry.test-provider", "x"),
+            true,
+            None,
+        )
+        .sharing_flag(provider.enabled_flag());
+        let id = RequestId("r".into());
+
+        assert!(!provider.is_enabled());
+        handle_set_remote_features_enabled(&id, true, &data_dir, &provider);
+        assert!(provider.is_enabled() && worker_view.is_enabled());
+        handle_set_remote_features_enabled(&id, false, &data_dir, &provider);
+        assert!(!provider.is_enabled() && !worker_view.is_enabled(), "the worker must stop honouring jobs too");
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 

@@ -1,42 +1,64 @@
 import * as vscode from "vscode";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { DaemonBridge, defaultSocketPath } from "./daemon-bridge";
-import { daemonReachable, startDaemon, stopDaemon } from "./daemon-lifecycle";
+import { configuredSocketPath, DaemonBridge } from "./daemon-bridge";
+import { daemonReachable, runningDaemonIsOutdated, startDaemon, stopDaemon } from "./daemon-lifecycle";
 import { identity } from "./identity";
-
-function socketPath(): string {
-  const configured = vscode.workspace.getConfiguration("ferry").get<string>("socketPath");
-  return configured && configured.length > 0 ? configured : defaultSocketPath();
-}
+import { DaemonMonitor } from "./monitor";
 
 let panel: vscode.WebviewPanel | undefined;
-let sidebar: vscode.WebviewView | undefined;
 const webviewMessages = new vscode.EventEmitter<unknown>();
 
 export interface FerryExtensionApi {
   onWebviewMessage: vscode.Event<unknown>;
 }
 
-async function ensureDaemon(context: vscode.ExtensionContext, notifyWhenAlreadyUp: boolean): Promise<void> {
-  const sock = socketPath();
-  if (await daemonReachable(sock)) {
-    if (notifyWhenAlreadyUp) vscode.window.showInformationMessage("Ferry: the daemon is already running.");
-    return;
+function autoStartEnabled(): boolean {
+  return vscode.workspace.getConfiguration("ferry").get<boolean>("autoStartDaemon", true);
+}
+
+async function ensureDaemon(context: vscode.ExtensionContext, announce: boolean): Promise<boolean> {
+  const socket = configuredSocketPath();
+  if (await daemonReachable(socket)) {
+    if (announce) vscode.window.showInformationMessage("Ferry: the daemon is already running.");
+    return true;
   }
-  await vscode.window.withProgress(
+  return vscode.window.withProgress(
     { location: vscode.ProgressLocation.Window, title: "Ferry: starting daemon…" },
     async () => {
       try {
-        await startDaemon(context, sock);
-        vscode.window.showInformationMessage("Ferry: daemon started.");
+        await startDaemon(context, socket);
+        if (announce) vscode.window.showInformationMessage("Ferry: daemon started.");
+        return true;
       } catch (err) {
-        vscode.window.showErrorMessage(
-          `Ferry: could not start the daemon — ${String((err as Error).message ?? err)}. Run \`ferry daemon start\` in a terminal.`,
-        );
+        const reason = String((err as Error).message ?? err);
+        if (announce) vscode.window.showErrorMessage(`Ferry: could not start the daemon — ${reason}`);
+        else console.warn(`Ferry: could not start the daemon — ${reason}`);
+        return false;
       }
     },
   );
+}
+
+async function restartDaemon(context: vscode.ExtensionContext): Promise<void> {
+  if (!(await stopDaemon(configuredSocketPath()))) {
+    vscode.window.showErrorMessage("Ferry: the running daemon did not shut down, so it was not restarted.");
+    return;
+  }
+  await ensureDaemon(context, true);
+}
+
+let offeredUpgrade = false;
+
+async function offerUpgrade(context: vscode.ExtensionContext): Promise<void> {
+  if (offeredUpgrade || !(await runningDaemonIsOutdated(context, configuredSocketPath()))) return;
+  offeredUpgrade = true;
+  const choice = await vscode.window.showWarningMessage(
+    "Ferry: the running daemon is older than this extension. Restart it to use the bundled version?",
+    "Restart Daemon",
+  );
+  if (choice === "Restart Daemon") await restartDaemon(context);
 }
 
 function wireWebview(context: vscode.ExtensionContext, webview: vscode.Webview, initialRoute?: string): DaemonBridge {
@@ -44,7 +66,7 @@ function wireWebview(context: vscode.ExtensionContext, webview: vscode.Webview, 
     enableScripts: true,
     localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media", "ui")],
   };
-  const bridge = new DaemonBridge(socketPath(), (message) => void webview.postMessage(message), context);
+  const bridge = new DaemonBridge((message) => void webview.postMessage(message), context);
   let pendingRoute = initialRoute;
   webview.onDidReceiveMessage((message: { kind?: string }) => {
     webviewMessages.fire(message);
@@ -62,50 +84,55 @@ class SidebarProvider implements vscode.WebviewViewProvider {
   constructor(private context: vscode.ExtensionContext) {}
 
   resolveWebviewView(view: vscode.WebviewView): void {
-    sidebar = view;
     const bridge = wireWebview(this.context, view.webview);
-    view.onDidDispose(() => {
-      bridge.dispose();
-      if (sidebar === view) sidebar = undefined;
-    });
+    view.onDidDispose(() => bridge.dispose());
+    if (autoStartEnabled()) void ensureDaemon(this.context, false);
   }
 }
 
 export function activate(context: vscode.ExtensionContext): FerryExtensionApi {
-  context.subscriptions.push(webviewMessages);
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
-  status.text = "$(radio-tower) Ferry";
+  status.name = "Ferry";
   status.command = "ferry.open";
   status.show();
-  context.subscriptions.push(status);
+
+  const monitor = new DaemonMonitor(
+    status,
+    (route) => openPanel(context, route),
+    () => void offerUpgrade(context),
+  );
+  monitor.start();
 
   context.subscriptions.push(
+    webviewMessages,
+    status,
+    monitor,
     vscode.window.registerWebviewViewProvider("ferryMain", new SidebarProvider(context), {
       webviewOptions: { retainContextWhenHidden: true },
     }),
-  );
-
-  void ensureDaemon(context, false);
-
-  context.subscriptions.push(
     vscode.commands.registerCommand("ferry.open", () => openPanel(context)),
     vscode.commands.registerCommand("ferry.pair", () => openPanel(context, "/pair")),
     vscode.commands.registerCommand("ferry.openInbox", () => openPanel(context, "/inbox")),
     vscode.commands.registerCommand("ferry.startDaemon", () => ensureDaemon(context, true)),
-    vscode.commands.registerCommand("ferry.restartDaemon", async () => {
-      await stopDaemon(socketPath());
-      await ensureDaemon(context, false);
+    vscode.commands.registerCommand("ferry.stopDaemon", async () => {
+      if (await stopDaemon(configuredSocketPath())) vscode.window.showInformationMessage("Ferry: the daemon is stopped.");
+      else vscode.window.showErrorMessage("Ferry: the daemon did not shut down.");
     }),
-    vscode.commands.registerCommand("ferry.sendFile", async (uri?: vscode.Uri) => {
+    vscode.commands.registerCommand("ferry.restartDaemon", () => restartDaemon(context)),
+    vscode.commands.registerCommand("ferry.sendFile", (uri?: vscode.Uri) => {
       const target = uri ?? vscode.window.activeTextEditor?.document.uri;
       if (!target) {
         vscode.window.showWarningMessage("Ferry: no file selected.");
         return;
       }
+      if (target.scheme !== "file") {
+        vscode.window.showWarningMessage("Ferry: only files saved on this computer can be sent.");
+        return;
+      }
       openPanel(context, `/send?path=${encodeURIComponent(target.fsPath)}`);
     }),
     vscode.commands.registerCommand("ferry.copyFingerprint", async () => {
-      const id = await identity(socketPath());
+      const id = await identity(configuredSocketPath());
       if (id) {
         await vscode.env.clipboard.writeText(id.fingerprint);
         vscode.window.showInformationMessage("Ferry: fingerprint copied to clipboard.");
@@ -114,6 +141,8 @@ export function activate(context: vscode.ExtensionContext): FerryExtensionApi {
       }
     }),
   );
+
+  if (autoStartEnabled()) void ensureDaemon(context, false);
 
   return { onWebviewMessage: webviewMessages.event };
 }
@@ -130,20 +159,20 @@ function openPanel(context: vscode.ExtensionContext, route?: string) {
     retainContextWhenHidden: true,
     localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media", "ui")],
   });
+  panel.iconPath = vscode.Uri.joinPath(context.extensionUri, "media", "icon.png");
 
   const bridge = wireWebview(context, panel.webview, route);
-
   panel.onDidDispose(() => {
     bridge.dispose();
     panel = undefined;
   });
+  if (autoStartEnabled()) void ensureDaemon(context, false);
 }
 
 function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): string {
   const uiDir = vscode.Uri.joinPath(context.extensionUri, "media", "ui");
-  const indexPath = path.join(uiDir.fsPath, "index.html");
-  let html = fs.readFileSync(indexPath, "utf8");
-  const nonce = String(Math.random()).slice(2);
+  let html = fs.readFileSync(path.join(uiDir.fsPath, "index.html"), "utf8");
+  const nonce = randomBytes(16).toString("base64url");
 
   html = html.replace(/(src|href)="\/([^"]+)"/g, (_m, attr, rel) => {
     const uri = webview.asWebviewUri(vscode.Uri.joinPath(uiDir, rel));
@@ -159,11 +188,9 @@ function renderHtml(context: vscode.ExtensionContext, webview: vscode.Webview): 
     `connect-src ${webview.cspSource}`,
   ].join("; ");
 
-  html = html
+  return html
     .replace("<head>", `<head><meta http-equiv="Content-Security-Policy" content="${csp}">`)
     .replace(/<script type="module"/g, `<script type="module" nonce="${nonce}"`);
-
-  return html;
 }
 
 export function deactivate() {

@@ -294,7 +294,7 @@ export class MockTransport implements Transport {
       case "status":
         return ok({
           result: "status",
-          value: { protocol_version: 1, ipc_protocol_version: 1, discovery_ok: true, transport_ok: true, store_ok: true },
+          value: { protocol_version: 1, ipc_protocol_version: 1, discovery_ok: true, transport_ok: true, store_ok: true, daemon_version: "0.0.0-mock" },
         })(id);
       case "identity":
         return ok({ result: "identity", value: identity })(id);
@@ -333,6 +333,10 @@ export class MockTransport implements Transport {
             ),
           },
         })(id);
+      case "save_to":
+        this.inbox = this.inbox.map((i) => (i.item_id === request.params.item_id ? { ...i, state: "opened" as const } : i));
+        this.emit({ event: "changed", params: { resource: "transfer", id: request.params.item_id } });
+        return ok({ result: "saved", value: { size_bytes: b(12) } })(id);
       case "confirm_opened":
         this.inbox = this.inbox.map((i) => (i.item_id === request.params.item_id ? { ...i, state: "opened" as const } : i));
         this.emit({ event: "changed", params: { resource: "transfer", id: request.params.item_id } });

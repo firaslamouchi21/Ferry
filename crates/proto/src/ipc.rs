@@ -59,6 +59,7 @@ pub enum IpcRequest {
     InboxAccept { item_id: String },
     InboxReject { item_id: String },
     Open { item_id: String },
+    SaveTo { item_id: String, destination: String },
     ConfirmOpened { item_id: String },
     ExportSealed { item_id: String },
     ImportSealed { blob_base64: String },
@@ -167,6 +168,8 @@ pub struct DaemonStatus {
     pub discovery_ok: bool,
     pub transport_ok: bool,
     pub store_ok: bool,
+    #[serde(default)]
+    pub daemon_version: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -348,6 +351,7 @@ pub enum IpcResult {
     Send { item_id: String },
     InboxList(Vec<InboxItemView>),
     Open { content_base64: String },
+    Saved { size_bytes: u64 },
     ExportSealed { blob_base64: String },
     ImportSealed(SealedImportView),
     Identity(IdentityView),
