@@ -15,8 +15,8 @@ const EXPECTED_COMMANDS = [
 ];
 
 async function run() {
-  const ext = vscode.extensions.getExtension("ferry.ferry-vscode");
-  assert.ok(ext, "the Ferry extension was not found by id ferry.ferry-vscode");
+  const ext = vscode.extensions.getExtension("ferry.ferry-p2p");
+  assert.ok(ext, "the Ferry extension was not found by id ferry.ferry-p2p");
 
   await ext.activate();
   assert.strictEqual(ext.isActive, true, "the extension did not activate");

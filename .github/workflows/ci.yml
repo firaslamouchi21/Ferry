@@ -1,8 +1,9 @@
 name: CI
 
-# Automatic CI is disabled. Run manually from the Actions tab if needed.
 on:
-  workflow_dispatch:
+  push:
+    branches: [main,sandbox]
+  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -77,13 +78,13 @@ jobs:
         run: pnpm --filter @ferry/ui test
       - run: pnpm --filter @ferry/ui build
       - name: Build + package the VS Code extension (.vsix)
-        run: pnpm --filter ferry-vscode package
+        run: pnpm --filter ferry-p2p package
       - name: Extension activation smoke — activate() registers every command + the tree view without throwing
-        run: pnpm --filter ferry-vscode run test:activation
+        run: pnpm --filter ferry-p2p run test:activation
       - name: Install xvfb for the extension-host test
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Extension host test — real VS Code activates the extension, opens the webview, runs commands
-        run: xvfb-run -a pnpm --filter ferry-vscode run test:e2e
+        run: xvfb-run -a pnpm --filter ferry-p2p run test:e2e
       - uses: actions/upload-artifact@v4
         with:
           name: ferry-vsix-dev

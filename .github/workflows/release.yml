@@ -1,7 +1,8 @@
 name: Release
 
-# Automatic releases are disabled. Run manually from the Actions tab if needed.
 on:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -224,6 +225,44 @@ jobs:
           path: |
             ext/vscode/ferry-${{ matrix.vsce_target }}.vsix
             ext/vscode/SHA256SUMS-vsix-${{ matrix.vsce_target }}.txt
+
+  vsix-universal:
+    name: package one .vsix for every platform
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Regenerate bindings for the UI build
+        run: cargo test --package ferry-proto --locked
+      - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ferry-*-*
+          path: daemon-bin
+      - name: Package every daemon into a single .vsix
+        working-directory: ext/vscode
+        run: |
+          bins="$GITHUB_WORKSPACE/daemon-bin"
+          node scripts/package.mjs --universal \
+            --linux-x64 "$bins/ferry-linux-x86_64/ferry-daemon-linux-x86_64" \
+            --linux-arm64 "$bins/ferry-linux-aarch64/ferry-daemon-linux-aarch64" \
+            --darwin-x64 "$bins/ferry-macos-x86_64/ferry-daemon-macos-x86_64" \
+            --darwin-arm64 "$bins/ferry-macos-aarch64/ferry-daemon-macos-aarch64" \
+            --win32-x64 "$bins/ferry-windows-x86_64/ferry-daemon-windows-x86_64.exe" \
+            --out ferry-universal.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: universal-extension
+          path: ext/vscode/ferry-universal.vsix
+          if-no-files-found: error
 
   publish-extension:
     name: publish .vsix to the marketplaces

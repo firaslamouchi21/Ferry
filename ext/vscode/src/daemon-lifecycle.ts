@@ -16,7 +16,11 @@ export function extensionVersion(context: vscode.ExtensionContext): string {
 }
 
 export function bundledDaemonPath(context: vscode.ExtensionContext): string {
-  return path.join(context.extensionUri.fsPath, "bin", DAEMON_NAME);
+  const bin = path.join(context.extensionUri.fsPath, "bin");
+  const platforms = [`${process.platform}-${process.arch}`];
+  if (process.platform === "win32") platforms.push("win32-x64");
+  const candidates = [...platforms.map((platform) => path.join(bin, platform, DAEMON_NAME)), path.join(bin, DAEMON_NAME)];
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? path.join(bin, DAEMON_NAME);
 }
 
 function installBundledDaemon(context: vscode.ExtensionContext, bundled: string): string {

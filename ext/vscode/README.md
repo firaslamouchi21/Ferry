@@ -1,4 +1,4 @@
-# Ferry for VS Code
+# Ferry P2P for VS Code
 
 Send files, secrets, and short messages straight to your teammates' machines — over your own
 network, encrypted end to end, with no server, no cloud, and no account.
