@@ -22,6 +22,7 @@ export const en = {
     newTransfer: "New transfer",
     connected: "Daemon running",
     connectedVersion: "Daemon running · v{version}",
+    degraded: "Daemon running · network unavailable",
     connecting: "Connecting…",
     disconnected: "Daemon not running",
     primary: "Primary",

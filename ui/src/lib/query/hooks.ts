@@ -27,7 +27,7 @@ export function useRoster() {
 
 export function useInbox() {
   const ferry = useFerryClient();
-  return useQuery({ queryKey: queryKeys.inbox, queryFn: () => ferry.inboxList() });
+  return useQuery({ queryKey: queryKeys.inbox, queryFn: () => ferry.inboxList(), refetchInterval: 15_000 });
 }
 
 export function useInboxItem(itemId: string | undefined) {
@@ -37,7 +37,7 @@ export function useInboxItem(itemId: string | undefined) {
 
 export function useSentItems() {
   const ferry = useFerryClient();
-  return useQuery({ queryKey: queryKeys.sent, queryFn: () => ferry.sentList() });
+  return useQuery({ queryKey: queryKeys.sent, queryFn: () => ferry.sentList(), refetchInterval: 15_000 });
 }
 
 export function useAuditLog(limit = 200) {

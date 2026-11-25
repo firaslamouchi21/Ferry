@@ -24,6 +24,7 @@ export const ar: Catalog = {
     newTransfer: "نقل جديد",
     connected: "متصل",
     connectedVersion: "متصل v{version}",
+    degraded: "الخدمة تعمل · الشبكة غير متاحة",
     connecting: "جارٍ الاتصال",
     disconnected: "غير متصل",
     primary: "رئيسي",

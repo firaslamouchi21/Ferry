@@ -24,6 +24,7 @@ export const de: Catalog = {
     newTransfer: "Neuer Transfer",
     connected: "Verbunden",
     connectedVersion: "Verbunden v{version}",
+    degraded: "Daemon läuft · Netzwerk nicht verfügbar",
     connecting: "Verbinden…",
     disconnected: "Getrennt",
     primary: "Primär",

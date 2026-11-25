@@ -24,6 +24,7 @@ export const fr: Catalog = {
     newTransfer: "Nouveau transfert",
     connected: "Connecté",
     connectedVersion: "Connecté v{version}",
+    degraded: "Démon actif · réseau indisponible",
     connecting: "Connexion…",
     disconnected: "Déconnecté",
     primary: "Principal",

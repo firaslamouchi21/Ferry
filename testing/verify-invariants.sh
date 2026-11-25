@@ -201,6 +201,37 @@ peer a "$CLI" roster export "$ROOT/a-roster.json" >/dev/null 2>&1 || bad "roster
 peer b "$CLI" roster import "$ROOT/a-roster.json" --yes >/dev/null 2>&1 || bad "roster import failed"
 peer b "$CLI" activity --limit 40 2>/dev/null | grep -q "roster.imported" \
   && ok "b logged roster.imported" || bad "b has no roster.imported audit row"
+peer b "$CLI" roster list 2>/dev/null | grep -q "$BID" \
+  && bad "importing a teammate's roster added this machine to its own roster" || ok "a machine never imports itself as a peer"
+
+wait_presence() {
+  local name=$1 needle=$2 want=$3 tries=$4
+  for _ in $(seq 1 "$tries"); do
+    peer "$name" "$CLI" peer list 2>/dev/null | grep -i "$needle" | grep -qi "$want" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+echo
+echo "== peer status: a freshly paired, idle peer shows online on both sides, without sending anything =="
+if wait_presence a peer-b online 45 && wait_presence b peer-a online 45; then
+  ok "both sides show each other online right after pairing"
+  IDLE_SECS=${FERRY_IDLE_SECS:-100}
+  echo "     idling ${IDLE_SECS}s — longer than the reachability window"
+  sleep "$IDLE_SECS"
+  peer a "$CLI" peer list 2>/dev/null | grep -i peer-b | grep -qi online \
+    && ok "an idle peer stays online past the reachability window" || bad "an idle but running peer went offline"
+  stop_peer b KILL
+  wait_presence a peer-b offline 45 && ok "a killed peer turns offline promptly" || bad "a killed peer still shows online"
+  start_peer b "$PORT_B"
+  for _ in $(seq 1 40); do peer b "$CLI" status >/dev/null 2>&1 && break; sleep 0.5; done
+  wait_presence a peer-b online 45 && ok "a returning peer turns online again" || bad "a returning peer never came back online"
+elif [ "${FERRY_STRICT:-0}" = 1 ]; then
+  bad "peers never saw each other online and FERRY_STRICT=1"
+else
+  skip "peers never saw each other — mDNS multicast unavailable on this host"
+fi
 
 MDNS_OK=1
 echo

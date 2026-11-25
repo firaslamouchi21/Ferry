@@ -24,6 +24,7 @@ export const zh: Catalog = {
     newTransfer: "新建传输",
     connected: "已连接",
     connectedVersion: "已连接 v{version}",
+    degraded: "守护进程运行中 · 网络不可用",
     connecting: "连接中",
     disconnected: "已断开",
     primary: "主要",

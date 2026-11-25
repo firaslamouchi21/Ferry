@@ -24,6 +24,7 @@ export const ja: Catalog = {
     newTransfer: "新しい転送",
     connected: "接続済み",
     connectedVersion: "接続済み v{version}",
+    degraded: "デーモン稼働中 · ネットワーク利用不可",
     connecting: "接続中",
     disconnected: "切断",
     primary: "メイン",

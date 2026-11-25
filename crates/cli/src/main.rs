@@ -679,7 +679,12 @@ fn cmd_roster_list() -> Result<(), String> {
                 return Ok(());
             }
             for peer in peers {
-                println!("{}  {}", peer.peer_id, peer.display_name);
+                println!(
+                    "{}  {}  {}",
+                    peer.peer_id,
+                    peer.display_name,
+                    if peer.reachable { "online" } else { "offline" }
+                );
             }
             Ok(())
         }
