@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1
+
+- Renamed to Ferry P2P
+- Added a universal package that carries every platform's daemon
+
 ## 1.0.0
 
 First Marketplace release.

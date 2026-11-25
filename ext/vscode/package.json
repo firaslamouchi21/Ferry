@@ -3,7 +3,7 @@
   "displayName": "Ferry P2P",
   "description": "Send files, secrets, and short messages straight to your teammates' machines over the local network — no server, no cloud, no account",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "commonjs",
   "publisher": "ferry",
   "icon": "media/icon.png",
